@@ -1,5 +1,5 @@
 PREFIX = $(CONDA_PREFIX)
-GCC = $(PREFIX)/bin/clang
+GCC = $(PREFIX)/bin/gcc
 CFLAGS  = -g -Wall -std=gnu99 -I../ -I$(PREFIX)/include
 LDFLAGS = -L$(PREFIX)/lib -Wl,-rpath,$(PREFIX)/lib
 LIBS = -lm -lgsl -lgslcblas
