@@ -1,0 +1,6 @@
+[submodule "EffectiveSource"]
+	path = EffectiveSource
+	url = git@github.com:thompsonphys/EffectiveSource.git
+[submodule "KerrGeodesicsC"]
+	path = KerrGeodesicsC
+	url = git@github.com:thompsonphys/KerrGeodesicsC.git
