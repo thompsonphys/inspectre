@@ -40,14 +40,49 @@ double fourVel(double psi, double a, double p, double e, double E)
     return e * sin(psi) / p * (X2 + a * a + 2.0 * X * a * E - 2.0 * X2 / p * (3 + e * cos(psi)));
 }
 
+/* Assuming exp(i Omega t) rotation */
+double frequencyShiftReal(double t, double omegaPhi, double omegaR, double fieldRE, double fieldIM, int mMode, int nMode)
+{
+    double frequency = (double)mMode * omegaPhi + (double)nMode * omegaR;
+    double angle = frequency * t;
+    return fieldRE * cos(angle) - fieldIM * sin(angle);
+}
+
+double frequencyShiftImag(double t, double omegaPhi, double omegaR, double fieldRE, double fieldIM, int mMode, int nMode)
+{
+    double frequency = (double)mMode * omegaPhi + (double)nMode * omegaR;
+    double angle = frequency * t;
+    return fieldIM * cos(angle) + fieldRE * sin(angle);
+}
+
+/* just brute force this */
+void generateNModeIntegrands(double t, double omegaPhi, double omegaR, int mMode, int nMode, double *Field, double *FieldDeriv, double *EffSrc, double *nModeField, double *nModeFieldDeriv, double *nModeEffSrc)
+{
+    nModeField[0] = frequencyShiftReal(t, omegaPhi, omegaR, Field[0], Field[1], mMode, nMode);
+    nModeField[1] = frequencyShiftImag(t, omegaPhi, omegaR, Field[0], Field[1], mMode, nMode);
+
+    nModeFieldDeriv[0] = frequencyShiftReal(t, omegaPhi, omegaR, FieldDeriv[0], FieldDeriv[1], mMode, nMode);
+    nModeFieldDeriv[1] = frequencyShiftImag(t, omegaPhi, omegaR, FieldDeriv[0], FieldDeriv[1], mMode, nMode);
+    nModeFieldDeriv[2] = frequencyShiftReal(t, omegaPhi, omegaR, FieldDeriv[2], FieldDeriv[3], mMode, nMode);
+    nModeFieldDeriv[3] = frequencyShiftImag(t, omegaPhi, omegaR, FieldDeriv[2], FieldDeriv[3], mMode, nMode);
+    nModeFieldDeriv[4] = frequencyShiftReal(t, omegaPhi, omegaR, FieldDeriv[4], FieldDeriv[5], mMode, nMode);
+    nModeFieldDeriv[5] = frequencyShiftImag(t, omegaPhi, omegaR, FieldDeriv[4], FieldDeriv[5], mMode, nMode);
+    nModeFieldDeriv[6] = frequencyShiftReal(t, omegaPhi, omegaR, FieldDeriv[6], FieldDeriv[7], mMode, nMode);
+    nModeFieldDeriv[7] = frequencyShiftImag(t, omegaPhi, omegaR, FieldDeriv[6], FieldDeriv[7], mMode, nMode);
+
+    nModeEffSrc[0] = frequencyShiftReal(t, omegaPhi, omegaR, EffSrc[0], EffSrc[1], mMode, nMode);
+    nModeEffSrc[1] = frequencyShiftImag(t, omegaPhi, omegaR, EffSrc[0], EffSrc[1], mMode, nMode);
+}
+
 int main(int argc, char *argv[])
 {
 
     /* initialization */
-    int numTimePts, numPeriods, mValue, nValue, eccentric, inclined;
+    int numTimePts, numPeriods, mMode, nMode, eccentric, inclined;
     double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
+    double nModePhiS[2], nModeDPhiS[8], nModesrc[2];
     double lam, psi, t, r_p, phi_p, ur, a, p, e, x, err;
-    double MinoPeriodR, deltaLambda;
+    double MinoPeriodR, deltaLambda, omegaPhi, omegaR;
     struct coordinate xParticle;
     struct coordinate xField;
     korb_params orbpar;
@@ -72,8 +107,8 @@ int main(int argc, char *argv[])
     numPeriods = (int)strtod(argv[8], NULL);
 
     /* set m-mode and n-mode from input */
-    mValue = (int)strtod(argv[9], NULL);
-    nValue = (int)strtod(argv[10], NULL);
+    mMode = (int)strtod(argv[9], NULL);
+    nMode = (int)strtod(argv[10], NULL);
 
     /* set field point from inputs */
     xField.r = strtod(argv[5], NULL);
@@ -94,12 +129,18 @@ int main(int argc, char *argv[])
     MinoPeriodR = 2.0 * M_PI / orbpar.Yr;
     deltaLambda = (double)numPeriods * MinoPeriodR / ((double)numTimePts - 1.0);
 
+    /* Get frequencies for n-mode decomposition */
+    omegaPhi = orbpar.wphi;
+    omegaR = orbpar.wr;
+
     /* setting up output files */
-    FILE *fp, *esd;
+    FILE *fp, *esd, *nmd;
     fp = fopen("data/traj_source.dat", "w");
     fprintf(fp, "# lambda\ttime\tradius\tphi\tfourVel\tReField\tImField\tReEffSrc\tImEffSrc\n");
     esd = fopen("data/puncture_derivs.dat", "w");
     fprintf(esd, "# time\tReDtField\tImDtField\tReDrField\tImDrField\tReDthField\tImDthField\tReDphiField\tImDphiField\n");
+    nmd = fopen("data/nmode_data.dat", "w");
+    fprintf(nmd, "# time\tReField\tImField\tReDtField\tImDtField\tReDrField\tImDrField\tReDthField\tImDthField\tReDphiField\tImDphiField\tReEffSrc\tImEffSrc\n");
 
     // looping over Mino time steps
     for (int i = 0; i < numTimePts; i++)
@@ -125,17 +166,36 @@ int main(int argc, char *argv[])
         effsource_set_particle(&xParticle, orbpar.E, orbpar.Lz, ur);
 
         // calculate m-mode field
-        effsource_calc_m(mValue, &xField, PhiS, dPhiS, ddPhiS, src);
+        effsource_calc_m(mMode, &xField, PhiS, dPhiS, ddPhiS, src);
 
         fprintf(fp, "%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\n",
                 lam, t, r_p, phi_p, ur, PhiS[0], PhiS[1], src[0], src[1]);
 
         fprintf(esd, "%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\n",
                 t, dPhiS[0], dPhiS[1], dPhiS[2], dPhiS[3], dPhiS[4], dPhiS[5], dPhiS[6], dPhiS[7]);
+
+        /* get n-mode integrand timeseries data */
+        generateNModeIntegrands(t, omegaPhi, omegaR, mMode, nMode, PhiS, dPhiS, src, nModePhiS, nModeDPhiS, nModesrc);
+
+        fprintf(nmd, "%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\n",
+                t,
+                nModePhiS[0],
+                nModePhiS[1],
+                nModeDPhiS[0],
+                nModeDPhiS[1],
+                nModeDPhiS[2],
+                nModeDPhiS[3],
+                nModeDPhiS[4],
+                nModeDPhiS[5],
+                nModeDPhiS[6],
+                nModeDPhiS[7],
+                nModesrc[0],
+                nModesrc[1]);
     }
 
     fclose(fp);
     fclose(esd);
+    fclose(nmd);
 
     korb_freepar(orbpar);
 
