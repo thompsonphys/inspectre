@@ -2,3 +2,4 @@
 data/
 bin/
 *.o
+.ipynb_checkpoints
