@@ -13,109 +13,125 @@
 
 double xFuncInsp(double a, double p, double e)
 {
-  double x, F, N, C, signA;
-  double p2, p3, e2p3;
+    double x, F, N, C, signA;
+    double p2, p3, e2p3;
 
-  signA = a > 0.0 ? 1.0 : -1.0;
+    signA = a > 0.0 ? 1.0 : -1.0;
 
-  p2 = p * p;
-  p3 = p2 * p;
-  e2p3 = 3.0 + e*e;
+    p2 = p * p;
+    p3 = p2 * p;
+    e2p3 = 3.0 + e * e;
 
-  C = (a * a - p);
-  C *= C;
-  N = 2.0 / p * (-p2 + (e2p3 - a * a) * p - a * a * (1 + 3.0 * e * e) );
-  F = 1 / p3 * (
-    p3 - 2.0*e2p3*p2 + e2p3*e2p3*p - 4.0 * a * a * (1.0 - e * e) * (1.0 - e * e)
-  );
+    C = (a * a - p);
+    C *= C;
+    N = 2.0 / p * (-p2 + (e2p3 - a * a) * p - a * a * (1 + 3.0 * e * e));
+    F = 1 / p3 * (p3 - 2.0 * e2p3 * p2 + e2p3 * e2p3 * p - 4.0 * a * a * (1.0 - e * e) * (1.0 - e * e));
 
-  x = sqrt((-N-signA*sqrt(N*N-4.0*F*C))/(2.0*F));
+    x = sqrt((-N - signA * sqrt(N * N - 4.0 * F * C)) / (2.0 * F));
 
-  return x;
+    return x;
 }
 
-double fourVel(double psi, double a, double p, double e, double E){
+double fourVel(double psi, double a, double p, double e, double E)
+{
     double X = xFuncInsp(a, p, e);
     double X2 = X * X;
 
-    return e * sin(psi) / p * (X2 + a*a + 2.0 * X * a * E - 2.0 * X2 / p * (3 + e * cos(psi)));
+    return e * sin(psi) / p * (X2 + a * a + 2.0 * X * a * E - 2.0 * X2 / p * (3 + e * cos(psi)));
 }
 
-int main(int argc, char *argv[]){
+int main(int argc, char *argv[])
+{
 
-    if (argc < 2){
-        printf("please input parameters in order: a, p, e, x and number of time points\n");
+    /* initialization */
+    int numTimePts, numPeriods, mValue, nValue, eccentric, inclined;
+    double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
+    double lam, psi, t, r_p, phi_p, ur, a, p, e, x, err;
+    double MinoPeriodR, deltaLambda;
+    struct coordinate xParticle;
+    struct coordinate xField;
+    korb_params orbpar;
+
+    /* Disable the GSL error handler so that it doesn't abort due to roundoff errors */
+    gsl_set_error_handler_off();
+
+    if (argc < 2)
+    {
+        printf("please input parameters in order: a, p, e, x, number of time points, m-mode and n-mode\n");
         return 0;
     }
 
-    struct coordinate xParticle;
-    struct coordinate xField;
+    /* set orbit parameters from inputs */
+    a = strtod(argv[1], NULL);
+    p = strtod(argv[2], NULL);
+    e = strtod(argv[3], NULL);
+    x = strtod(argv[4], NULL);
+
+    /* set timesteps from input */
+    numTimePts = (int)strtod(argv[7], NULL);
+    numPeriods = (int)strtod(argv[8], NULL);
+
+    /* set m-mode and n-mode from input */
+    mValue = (int)strtod(argv[9], NULL);
+    nValue = (int)strtod(argv[10], NULL);
+
+    /* set field point from inputs */
+    xField.r = strtod(argv[5], NULL);
+    xField.theta = strtod(argv[6], NULL);
     xField.t = 0.0;
     xField.phi = 0.0;
 
-    // set orbit parameters from inputs
-    double a = strtod(argv[1], NULL);
-    double p = strtod(argv[2], NULL);
-    double e = strtod(argv[3], NULL);
-    double x = strtod(argv[4], NULL);
+    eccentric = e > 0.0 ? 1 : 0;
+    inclined = fabs(1.0 - x) <= 1e-14 ? 0 : 1;
 
-    // set field point from inputs
-    xField.r = strtod(argv[5], NULL);
-    xField.theta = strtod(argv[6], NULL);
+    err = 1.0e-15;
 
-    // set timesteps from input
-    int numTimePts = (int)strtod(argv[7], NULL);
-
-    int mValue = (int)strtod(argv[8], NULL);
-
-    int eccentric = e > 0.0 ? 1 : 0;
-    int inclined = fabs(1.0 - x) <= 1e-14 ? 0  : 1;
-
-    double err = 1.0e-15;
-    korb_params orbpar;
-
-    // All orbital characteristics are calculated and stored inside "orbpar"
+    /* All orbital characteristics are calculated and stored inside "orbpar" */
     korb_getparams(eccentric, inclined, a, p, e, x, err, &orbpar);
 
-    double MinoPeriodR = 2.0 * M_PI / orbpar.Yr;
-    double deltaLambda = MinoPeriodR / ((double)numTimePts-1.0);
+    /* Get the Mino time radial period and sample uniformly over numPeriods
+       full periods for numTimePts */
+    MinoPeriodR = 2.0 * M_PI / orbpar.Yr;
+    deltaLambda = (double)numPeriods * MinoPeriodR / ((double)numTimePts - 1.0);
 
+    /* setting up output files */
     FILE *fp, *esd;
     fp = fopen("data/traj_source.dat", "w");
     fprintf(fp, "# lambda\ttime\tradius\tphi\tfourVel\tReField\tImField\tReEffSrc\tImEffSrc\n");
     esd = fopen("data/puncture_derivs.dat", "w");
     fprintf(esd, "# time\tReDtField\tImDtField\tReDrField\tImDrField\tReDthField\tImDthField\tReDphiField\tImDphiField\n");
 
+    // looping over Mino time steps
+    for (int i = 0; i < numTimePts; i++)
+    {
+        lam = (double)i * deltaLambda;
 
-    for(int i=0; i<numTimePts; i++){
-        double lam = (double)i * deltaLambda;
-        double psi = korb_psifromla(lam, orbpar);
-        double t = korb_tfromla(lam,orbpar);
-        double r_p = korb_rfrompsi(psi,orbpar);
-        double phi_p = korb_phifromla(lam,orbpar);
+        // find BL coordinate positions
+        psi = korb_psifromla(lam, orbpar);
+        t = korb_tfromla(lam, orbpar);
+        r_p = korb_rfrompsi(psi, orbpar);
+        phi_p = korb_phifromla(lam, orbpar);
 
-        double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
+        // set four-velocity
+        ur = fourVel(psi, a, p, e, orbpar.E);
 
-        double ur = fourVel(psi, a, p, e, orbpar.E);
-
+        // set effective source particle struct
         xParticle.t = 0.0;
         xParticle.r = r_p;
         xParticle.theta = M_PI_2; // enforce equatorial orbits for now
         xParticle.phi = phi_p;
 
-        effsource_set_particle(&xParticle, orbpar.E, orbpar.Lz, ur); 
+        // compute effective source coefficients
+        effsource_set_particle(&xParticle, orbpar.E, orbpar.Lz, ur);
 
+        // calculate m-mode field
         effsource_calc_m(mValue, &xField, PhiS, dPhiS, ddPhiS, src);
 
-        /* Disable the GSL error handler so that it doesn't abort due to roundoff errors */
-        gsl_set_error_handler_off();
-
-        fprintf(fp, "%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\n", 
-            lam, t, r_p, phi_p, ur, PhiS[0], PhiS[1], src[0], src[1]);
+        fprintf(fp, "%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\n",
+                lam, t, r_p, phi_p, ur, PhiS[0], PhiS[1], src[0], src[1]);
 
         fprintf(esd, "%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\n",
-            t, dPhiS[0], dPhiS[1], dPhiS[2], dPhiS[3], dPhiS[4], dPhiS[5], dPhiS[6], dPhiS[7]);
-
+                t, dPhiS[0], dPhiS[1], dPhiS[2], dPhiS[3], dPhiS[4], dPhiS[5], dPhiS[6], dPhiS[7]);
     }
 
     fclose(fp);
