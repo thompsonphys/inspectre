@@ -92,7 +92,7 @@ int main(int argc, char *argv[])
 
     if (argc < 2)
     {
-        printf("please input parameters in order: a, p, e, x, number of time points, m-mode and n-mode\n");
+        printf("please input parameters in order: a, p, e, x, number of time points, number of periods, m-mode and n-mode\n");
         return 0;
     }
 
