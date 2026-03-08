@@ -9,6 +9,7 @@ EFFSRCDIR = $(PWD)/lib/effectivesource
 EFFSRCTESTDIR = $(EFFSRCDIR)/test
 KERRGEODIR = $(PWD)/lib/kerrgeodesics
 SRCDIR = $(PWD)/src
+TESTDIR = $(PWD)/test
 
 all : subdirs
 
@@ -16,6 +17,9 @@ subdirs :
 	$(MAKE) -C $(EFFSRCTESTDIR)
 	$(MAKE) -C $(KERRGEODIR)
 	$(MAKE) -C $(SRCDIR)
+	
+test : subdirs
+	$(MAKE) -C $(TESTDIR)
 
 clean :
 	rm -rf *.o
@@ -23,5 +27,6 @@ clean :
 	$(MAKE) -C $(EFFSRCTESTDIR) clean
 	$(MAKE) -C $(KERRGEODIR) clean
 	$(MAKE) -C $(SRCDIR) clean
+	$(MAKE) -C $(TESTDIR) clean
 
-.PHONY : clean subdirs all
+.PHONY : clean subdirs test all
