@@ -22,5 +22,6 @@ clean :
 	rm -rf bin/*
 	$(MAKE) -C $(EFFSRCTESTDIR) clean
 	$(MAKE) -C $(KERRGEODIR) clean
+	$(MAKE) -C $(SRCDIR) clean
 
 .PHONY : clean subdirs all

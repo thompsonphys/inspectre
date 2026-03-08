@@ -9,15 +9,16 @@ EFFSRCDIR = $(PWD)/lib/effectivesource
 EFFSRCTESTDIR = $(EFFSRCDIR)/test
 KERRGEODIR = $(PWD)/lib/kerrgeodesics
 
-all : inspector
+all : inspectre
 
-inspector : inspector.o 
-	$(GCC) $(CFLAGS) -o ../bin/inspector inspector.o $(KERRGEODIR)/korb.o $(LDFLAGS) $(LIBS)
+inspectre : inspectre.o 
+	$(GCC) $(CFLAGS) -o ../bin/inspectre inspectre.o $(KERRGEODIR)/korb.o $(EFFSRCTESTDIR)/kerr-equatorial-dtcoeffs.o $(EFFSRCTESTDIR)/kerr-equatorial-dttcoeffs.o $(EFFSRCTESTDIR)/kerr-equatorial-coeffs.o $(EFFSRCTESTDIR)/kerr-equatorial.o $(LDFLAGS) $(LIBS)
 
-inspector.o : inspector.c 
-	$(GCC) $(CFLAGS) -O3 -c -o inspector.o $(KERRGEODIR)/korb.o inspector.c
+inspectre.o : inspectre.c 
+	$(GCC) $(CFLAGS) -O3 -c -o inspectre.o $(KERRGEODIR)/korb.o inspectre.c
 
 clean :
+	rm -rf inspectre
 	rm -rf *.o
 
 .PHONY : clean all
