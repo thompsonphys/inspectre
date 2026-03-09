@@ -79,10 +79,13 @@ int main(int argc, char *argv[])
 
     /* initialization */
     int numTimePts, numPeriods, mMode, nMode, eccentric, inclined;
+    int numRadialPts, numThetaPts;
     double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
     double nModePhiS[2], nModeDPhiS[8], nModesrc[2];
     double lam, psi, t, r_p, phi_p, ur, a, p, e, x, err;
     double MinoPeriodR, deltaLambda, omegaPhi, omegaR;
+    double rMin, rMax, rMinField, rMaxField, deltaRadius;
+    double thetaMin, thetaMax, deltaTheta;
     struct coordinate xParticle;
     struct coordinate xField;
     korb_params orbpar;
@@ -103,44 +106,96 @@ int main(int argc, char *argv[])
     x = strtod(argv[4], NULL);
 
     /* set timesteps from input */
-    numTimePts = (int)strtod(argv[7], NULL);
-    numPeriods = (int)strtod(argv[8], NULL);
+    numTimePts = (int)strtod(argv[5], NULL);
+    numPeriods = (int)strtod(argv[6], NULL);
 
     /* set m-mode and n-mode from input */
-    mMode = (int)strtod(argv[9], NULL);
-    nMode = (int)strtod(argv[10], NULL);
+    mMode = (int)strtod(argv[7], NULL);
+    nMode = (int)strtod(argv[8], NULL);
 
-    /* set field point from inputs */
-    xField.r = strtod(argv[5], NULL);
-    xField.theta = strtod(argv[6], NULL);
-    xField.t = 0.0;
-    xField.phi = 0.0;
+    /* set spatial sampling from input */
+    numRadialPts = (int)strtod(argv[9], NULL);
+    numThetaPts = (int)strtod(argv[10], NULL);
 
     eccentric = e > 0.0 ? 1 : 0;
     inclined = fabs(1.0 - x) <= 1e-14 ? 0 : 1;
 
     err = 1.0e-15;
 
+    if (eccentric == 1)
+    {
+        rMin = p / (1.0 + e);
+        rMax = p / (1.0 - e);
+    }
+    else
+    {
+        rMax = p;
+        rMin = p;
+    }
+
+    /* just hack this in here */
+    rMinField = rMin - 1.0;
+    rMaxField = rMax + 1.0;
+    deltaRadius = (rMaxField - rMinField) / ((double)numRadialPts - 1.0);
+
+    thetaMin = M_PI_2 - 0.08;
+    thetaMax = M_PI_2 + 0.08;
+    deltaTheta = (thetaMax - thetaMin) / ((double)numThetaPts - 1.0);
+
     /* All orbital characteristics are calculated and stored inside "orbpar" */
     korb_getparams(eccentric, inclined, a, p, e, x, err, &orbpar);
 
     /* Get the Mino time radial period and sample uniformly over numPeriods
        full periods for numTimePts */
-    MinoPeriodR = 2.0 * M_PI / orbpar.Yr;
+    MinoPeriodR = orbpar.Vr;
     deltaLambda = (double)numPeriods * MinoPeriodR / ((double)numTimePts - 1.0);
 
     /* Get frequencies for n-mode decomposition */
     omegaPhi = orbpar.wphi;
     omegaR = orbpar.wr;
 
+    xField.t = 0.0;
+    xField.phi = 0.0;
+
     /* setting up output files */
-    FILE *fp, *esd, *nmd;
-    fp = fopen("data/traj_source.dat", "w");
-    fprintf(fp, "# lambda\ttime\tradius\tphi\tfourVel\tReField\tImField\tReEffSrc\tImEffSrc\n");
-    esd = fopen("data/puncture_derivs.dat", "w");
-    fprintf(esd, "# time\tReDtField\tImDtField\tReDrField\tImDrField\tReDthField\tImDthField\tReDphiField\tImDphiField\n");
-    nmd = fopen("data/nmode_data.dat", "w");
-    fprintf(nmd, "# time\tReField\tImField\tReDtField\tImDtField\tReDrField\tImDrField\tReDthField\tImDthField\tReDphiField\tImDphiField\tReEffSrc\tImEffSrc\n");
+    FILE *trajFile, *fieldReFile, *fieldImFile, *sourceReFile, *sourceImFile, *fieldDrReFile, *fieldDrImFile, *fieldDthReFile, *fieldDthImFile;
+    FILE *nfieldReFile, *nfieldImFile, *nsourceReFile, *nsourceImFile, *nfieldDrReFile, *nfieldDrImFile, *nfieldDthReFile, *nfieldDthImFile;
+
+    trajFile = fopen("data/trajectory.dat", "w");
+    fprintf(trajFile, "# lambda\ttime\tradius\tphi\tfourVel\n");
+    fieldReFile = fopen("data/puncture_re.dat", "w");
+    fprintf(fieldReFile, "# time\tPts\n");
+    fieldImFile = fopen("data/puncture_im.dat", "w");
+    fprintf(fieldImFile, "# time\tPts\n");
+    sourceReFile = fopen("data/source_re.dat", "w");
+    fprintf(sourceReFile, "# time\tPts\n");
+    sourceImFile = fopen("data/source_im.dat", "w");
+    fprintf(sourceImFile, "# time\tPts\n");
+    fieldDrReFile = fopen("data/puncture_dr_re.dat", "w");
+    fprintf(fieldDrReFile, "# time\tPts\n");
+    fieldDrImFile = fopen("data/puncture_dr_im.dat", "w");
+    fprintf(fieldDrImFile, "# time\tPts\n");
+    fieldDthReFile = fopen("data/puncture_dth_re.dat", "w");
+    fprintf(fieldDthReFile, "# time\tPts\n");
+    fieldDthImFile = fopen("data/puncture_dth_im.dat", "w");
+    fprintf(fieldDthImFile, "# time\tPts\n");
+
+    nfieldReFile = fopen("data/n_puncture_re.dat", "w");
+    fprintf(nfieldReFile, "# time\tPts\n");
+    nfieldImFile = fopen("data/n_puncture_im.dat", "w");
+    fprintf(nfieldImFile, "# time\tPts\n");
+    nsourceReFile = fopen("data/n_source_re.dat", "w");
+    fprintf(nsourceReFile, "# time\tPts\n");
+    nsourceImFile = fopen("data/n_source_im.dat", "w");
+    fprintf(nsourceImFile, "# time\tPts\n");
+    nfieldDrReFile = fopen("data/n_puncture_dr_re.dat", "w");
+    fprintf(nfieldDrReFile, "# time\tPts\n");
+    nfieldDrImFile = fopen("data/n_puncture_dr_im.dat", "w");
+    fprintf(nfieldDrImFile, "# time\tPts\n");
+    nfieldDthReFile = fopen("data/n_puncture_dth_re.dat", "w");
+    fprintf(nfieldDthReFile, "# time\tPts\n");
+    nfieldDthImFile = fopen("data/n_puncture_dth_im.dat", "w");
+    fprintf(nfieldDthImFile, "# time\tPts\n");
 
     // looping over Mino time steps
     for (int i = 0; i < numTimePts; i++)
@@ -162,40 +217,100 @@ int main(int argc, char *argv[])
         xParticle.theta = M_PI_2; // enforce equatorial orbits for now
         xParticle.phi = phi_p;
 
+        fprintf(trajFile, "%.15f\t%.15f\t%.15f\t%.15f\t%.15f\n",
+                lam, t, r_p, phi_p, ur);
+
+        fprintf(fieldReFile, "%.15g", t);
+        fprintf(fieldImFile, "%.15g", t);
+        fprintf(sourceReFile, "%.15g", t);
+        fprintf(sourceImFile, "%.15g", t);
+        fprintf(fieldDrReFile, "%.15g", t);
+        fprintf(fieldDrImFile, "%.15g", t);
+        fprintf(fieldDthReFile, "%.15g", t);
+        fprintf(fieldDthImFile, "%.15g", t);
+
+        fprintf(nfieldReFile, "%.15g", t);
+        fprintf(nfieldImFile, "%.15g", t);
+        fprintf(nsourceReFile, "%.15g", t);
+        fprintf(nsourceImFile, "%.15g", t);
+        fprintf(nfieldDrReFile, "%.15g", t);
+        fprintf(nfieldDrImFile, "%.15g", t);
+        fprintf(nfieldDthReFile, "%.15g", t);
+        fprintf(nfieldDthImFile, "%.15g", t);
+
         // compute effective source coefficients
         effsource_set_particle(&xParticle, orbpar.E, orbpar.Lz, ur);
 
-        // calculate m-mode field
-        effsource_calc_m(mMode, &xField, PhiS, dPhiS, ddPhiS, src);
+        // looping over theta field points
+        for (int j = 0; j < numThetaPts; j++)
+        {
+            xField.theta = thetaMin + (double)j * deltaTheta;
 
-        fprintf(fp, "%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\n",
-                lam, t, r_p, phi_p, ur, PhiS[0], PhiS[1], src[0], src[1]);
+            // looping over radial field points
+            for (int k = 0; k < numRadialPts; k++)
+            {
+                xField.r = rMinField + (double)k * deltaRadius;
 
-        fprintf(esd, "%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\n",
-                t, dPhiS[0], dPhiS[1], dPhiS[2], dPhiS[3], dPhiS[4], dPhiS[5], dPhiS[6], dPhiS[7]);
+                // calculate m-mode field
+                effsource_calc_m(mMode, &xField, PhiS, dPhiS, ddPhiS, src);
 
-        /* get n-mode integrand timeseries data */
-        generateNModeIntegrands(t, omegaPhi, omegaR, mMode, nMode, PhiS, dPhiS, src, nModePhiS, nModeDPhiS, nModesrc);
+                fprintf(fieldReFile, ",%.15g", PhiS[0]);
+                fprintf(fieldImFile, ",%.15g", PhiS[1]);
+                fprintf(sourceReFile, ",%.15g", src[0]);
+                fprintf(sourceImFile, ",%.15g", src[1]);
+                fprintf(fieldDrReFile, ",%.15g", dPhiS[2]);
+                fprintf(fieldDrImFile, ",%.15g", dPhiS[3]);
+                fprintf(fieldDthReFile, ",%.15g", dPhiS[4]);
+                fprintf(fieldDthImFile, ",%.15g", dPhiS[5]);
 
-        fprintf(nmd, "%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\t%.15g\n",
-                t,
-                nModePhiS[0],
-                nModePhiS[1],
-                nModeDPhiS[0],
-                nModeDPhiS[1],
-                nModeDPhiS[2],
-                nModeDPhiS[3],
-                nModeDPhiS[4],
-                nModeDPhiS[5],
-                nModeDPhiS[6],
-                nModeDPhiS[7],
-                nModesrc[0],
-                nModesrc[1]);
+                /* get n-mode integrand timeseries data */
+                generateNModeIntegrands(t, omegaPhi, omegaR, mMode, nMode, PhiS, dPhiS, src, nModePhiS, nModeDPhiS, nModesrc);
+
+                fprintf(nfieldReFile, ",%.15g", nModePhiS[0]);
+                fprintf(nfieldImFile, ",%.15g", nModePhiS[1]);
+                fprintf(nsourceReFile, ",%.15g", nModesrc[0]);
+                fprintf(nsourceImFile, ",%.15g", nModesrc[1]);
+                fprintf(nfieldDrReFile, ",%.15g", nModeDPhiS[2]);
+                fprintf(nfieldDrImFile, ",%.15g", nModeDPhiS[3]);
+                fprintf(nfieldDthReFile, ",%.15g", nModeDPhiS[4]);
+                fprintf(nfieldDthImFile, ",%.15g", nModeDPhiS[5]);
+            }
+        }
+        fprintf(fieldReFile, "\n");
+        fprintf(fieldImFile, "\n");
+        fprintf(sourceReFile, "\n");
+        fprintf(sourceImFile, "\n");
+        fprintf(fieldDrReFile, "\n");
+        fprintf(fieldDrImFile, "\n");
+        fprintf(fieldDthReFile, "\n");
+        fprintf(fieldDthImFile, "\n");
+        fprintf(nfieldReFile, "\n");
+        fprintf(nfieldImFile, "\n");
+        fprintf(nsourceReFile, "\n");
+        fprintf(nsourceImFile, "\n");
+        fprintf(nfieldDrReFile, "\n");
+        fprintf(nfieldDrImFile, "\n");
+        fprintf(nfieldDthReFile, "\n");
+        fprintf(nfieldDthImFile, "\n");
     }
 
-    fclose(fp);
-    fclose(esd);
-    fclose(nmd);
+    fclose(trajFile);
+    fclose(fieldReFile);
+    fclose(fieldImFile);
+    fclose(sourceReFile);
+    fclose(sourceImFile);
+    fclose(fieldDrReFile);
+    fclose(fieldDrImFile);
+    fclose(fieldDthReFile);
+    fclose(fieldDthImFile);
+    fclose(nfieldReFile);
+    fclose(nfieldImFile);
+    fclose(nsourceReFile);
+    fclose(nsourceImFile);
+    fclose(nfieldDrReFile);
+    fclose(nfieldDrImFile);
+    fclose(nfieldDthReFile);
+    fclose(nfieldDthImFile);
 
     korb_freepar(orbpar);
 
