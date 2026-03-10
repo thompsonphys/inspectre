@@ -12,10 +12,17 @@ SRCDIR = $(PWD)/src
 
 all : subdirs
 
+adaptive : subdirs-adaptive
+
 subdirs :
 	$(MAKE) -C $(EFFSRCTESTDIR)
 	$(MAKE) -C $(KERRGEODIR)
 	$(MAKE) -C $(SRCDIR)
+
+subdirs-adaptive :
+	$(MAKE) -C $(EFFSRCTESTDIR)
+	$(MAKE) -C $(KERRGEODIR)
+	$(MAKE) -C $(SRCDIR) adaptive
 
 clean :
 	rm -rf *.o
@@ -24,4 +31,4 @@ clean :
 	$(MAKE) -C $(KERRGEODIR) clean
 	$(MAKE) -C $(SRCDIR) clean
 
-.PHONY : clean subdirs all
+.PHONY : clean subdirs all subdirs-adaptive
