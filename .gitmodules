@@ -5,4 +5,4 @@
 [submodule "lib/effectivesource"]
 	path = lib/effectivesource
 	url = git@github.com:thompsonphys/EffectiveSource.git
-	branch = swig
+	branch = master
