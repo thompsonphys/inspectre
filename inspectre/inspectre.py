@@ -146,6 +146,24 @@ class Inspectre(KerrOrbit, EffectiveSource):
 
         return np.array(field_values)
 
+    def puncture_mn_integrand_along_trajectory(self, m, n, r_field, theta_field):
+
+        m_mode_data = self.puncture_mmode_along_trajectory(m, r_field, theta_field)
+
+        t, re, im = m_mode_data.T
+        angular_frequency = m * self.omega_phi + n * self.omega_r
+
+        sin_omega_t = np.sin(t * angular_frequency)
+        cos_omega_t = np.cos(t * angular_frequency)
+
+        return np.array(
+            [
+                t,
+                re * cos_omega_t - im * sin_omega_t,
+                im * cos_omega_t + re * sin_omega_t,
+            ]
+        ).T
+
     def source_along_trajectory(self, r_field, theta_field, phi_field):
 
         self.check_trajectory()
@@ -185,3 +203,22 @@ class Inspectre(KerrOrbit, EffectiveSource):
             field_values.append([t_p, re, im])
 
         return np.array(field_values)
+    
+
+    def source_mn_integrand_along_trajectory(self, m, n, r_field, theta_field):
+
+        m_mode_data = self.source_mmode_along_trajectory(m, r_field, theta_field)
+
+        t, re, im = m_mode_data.T
+        angular_frequency = m * self.omega_phi + n * self.omega_r
+
+        sin_omega_t = np.sin(t * angular_frequency)
+        cos_omega_t = np.cos(t * angular_frequency)
+
+        return np.array(
+            [
+                t,
+                re * cos_omega_t - im * sin_omega_t,
+                im * cos_omega_t + re * sin_omega_t,
+            ]
+        ).T
