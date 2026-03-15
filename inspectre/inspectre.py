@@ -1,8 +1,14 @@
 from .geodesics import KerrOrbit
 from .source import EffectiveSource
 import numpy as np
-from scipy.interpolate import InterpolatedUnivariateSpline as IUS
+from scipy.interpolate import CubicSpline
 from copy import deepcopy
+
+
+def set_array(duration, num_pts):
+    delta = duration / (num_pts - 1)
+    time_array = np.arange(num_pts) * duration / (num_pts - 1)
+    return delta, time_array
 
 
 class Inspectre(KerrOrbit, EffectiveSource):
@@ -40,11 +46,7 @@ class Inspectre(KerrOrbit, EffectiveSource):
 
         total_duration = num_periods * self.mino_period_r
 
-        # recompute delta_lambda to be endpoint inclusive
-        delta_lambda = total_duration / num_pts
-
-        # include endpoint
-        lambda_values = np.arange(0, total_duration + delta_lambda, step=delta_lambda)
+        delta_lambda, lambda_values = set_array(total_duration, num_pts)
 
         traj_data = []
         for lam in lambda_values:
@@ -88,9 +90,8 @@ class Inspectre(KerrOrbit, EffectiveSource):
         self._old_traj = deepcopy(self.trajectory)
 
         old_time = self.trajectory["t"]
-        new_delta_t = old_time[-1] / num_pts
 
-        new_times = np.arange(old_time[0], old_time[-1] + new_delta_t, step=new_delta_t)
+        new_delta_t, new_times = set_array(old_time[-1], num_pts)
 
         self.trajectory["t"] = new_times
 
@@ -98,7 +99,7 @@ class Inspectre(KerrOrbit, EffectiveSource):
             if k == "t" or k == "metadata":
                 continue
 
-            self.trajectory[k] = IUS(old_time, coord, k=3)(new_times)
+            self.trajectory[k] = CubicSpline(old_time, coord)(new_times)
 
         del self.trajectory["metadata"]["delta_lambda"]
 

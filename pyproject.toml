@@ -7,7 +7,7 @@ name = "inspectre"
 version = "0.1.0"
 description = "Effective source calculations for scalar particles in Kerr spacetime"
 requires-python = ">=3.8"
-dependencies = ["numpy"]
+dependencies = ["numpy", "scipy"]
 
 [tool.setuptools.packages.find]
 include = ["inspectre*"]
