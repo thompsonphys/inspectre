@@ -3,3 +3,9 @@ data/
 bin/
 *.o
 .ipynb_checkpoints
+__pycache__
+*.cpython*
+*.egg-info
+effsource_circular.py 
+effsource_equatorial.py 
+kerrgeodesics.py 

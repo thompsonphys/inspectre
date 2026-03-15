@@ -8,71 +8,82 @@
 #include <gsl/gsl_roots.h>
 #include <gsl/gsl_odeiv2.h>
 
-#include "../lib/kerrgeodesics/korb.h"
 #include "../lib/effectivesource/effsource.h"
+#include "../include/inspectre.h"
 
-double xFuncInsp(double a, double p, double e)
+double fourVelocityXFunction(double spin, double semiLatusRectum, double eccentricity)
 {
-    double x, F, N, C, signA;
-    double p2, p3, e2p3;
+    double F, N, C, signA;
+    double p2, p3, e2p3, e2, a2;
 
-    signA = a > 0.0 ? 1.0 : -1.0;
+    signA = spin > 0.0 ? 1.0 : -1.0;
 
-    p2 = p * p;
-    p3 = p2 * p;
-    e2p3 = 3.0 + e * e;
+    p2 = semiLatusRectum * semiLatusRectum;
+    p3 = p2 * semiLatusRectum;
+    e2 = eccentricity * eccentricity;
+    a2 = spin * spin;
+    e2p3 = 3.0 + e2;
 
-    C = (a * a - p);
+    C = (a2 - semiLatusRectum);
     C *= C;
-    N = 2.0 / p * (-p2 + (e2p3 - a * a) * p - a * a * (1 + 3.0 * e * e));
-    F = 1 / p3 * (p3 - 2.0 * e2p3 * p2 + e2p3 * e2p3 * p - 4.0 * a * a * (1.0 - e * e) * (1.0 - e * e));
+    N = 2.0 / semiLatusRectum * (-p2 + (e2p3 - a2) * semiLatusRectum - a2 * (1 + e2p3));
+    F = 1 / p3 * (p3 - 2.0 * e2p3 * p2 + e2p3 * e2p3 * semiLatusRectum - 4.0 * a2 * (1.0 - e2) * (1.0 - e2));
 
-    x = sqrt((-N - signA * sqrt(N * N - 4.0 * F * C)) / (2.0 * F));
-
-    return x;
+    return sqrt((-N - signA * sqrt(N * N - 4.0 * F * C)) / (2.0 * F));
 }
 
-double fourVel(double psi, double a, double p, double e, double E)
+double fourVelocity(double psi, double spin, double semiLatusRectum, double eccentricity, double energy)
 {
-    double X = xFuncInsp(a, p, e);
+    double X = fourVelocityXFunction(spin, semiLatusRectum, energy);
     double X2 = X * X;
+    double a2 = spin * spin;
 
-    return e * sin(psi) / p * (X2 + a * a + 2.0 * X * a * E - 2.0 * X2 / p * (3 + e * cos(psi)));
+    return eccentricity * sin(psi) / semiLatusRectum * (X2 + a2 + 2.0 * X * spin * energy - 2.0 * X2 / semiLatusRectum * (3.0 + eccentricity * cos(psi)));
 }
 
 /* Assuming exp(i Omega t) rotation */
-double frequencyShiftReal(double t, double omegaPhi, double omegaR, double fieldRE, double fieldIM, int mMode, int nMode)
+double frequencyShiftReal(double time, double omegaPhi, double omegaR, double fieldRE, double fieldIM, int mMode, int nMode)
 {
-    double frequency = (double)mMode * omegaPhi + (double)nMode * omegaR;
-    double angle = frequency * t;
+    double angle = ((double)mMode * omegaPhi + (double)nMode * omegaR) * time;
     return fieldRE * cos(angle) - fieldIM * sin(angle);
 }
 
-double frequencyShiftImag(double t, double omegaPhi, double omegaR, double fieldRE, double fieldIM, int mMode, int nMode)
+double frequencyShiftImag(double time, double omegaPhi, double omegaR, double fieldRE, double fieldIM, int mMode, int nMode)
 {
-    double frequency = (double)mMode * omegaPhi + (double)nMode * omegaR;
-    double angle = frequency * t;
+    double angle = ((double)mMode * omegaPhi + (double)nMode * omegaR) * time;
     return fieldIM * cos(angle) + fieldRE * sin(angle);
 }
 
-/* just brute force this */
-void generateNModeIntegrands(double t, double omegaPhi, double omegaR, int mMode, int nMode, double *Field, double *FieldDeriv, double *EffSrc, double *nModeField, double *nModeFieldDeriv, double *nModeEffSrc)
+/* loop over input array size */
+void generateNModeIntegrandAtTime(double time, double omegaPhi, double omegaR, int mMode, int nMode, double *field, double *nModeField)
 {
-    nModeField[0] = frequencyShiftReal(t, omegaPhi, omegaR, Field[0], Field[1], mMode, nMode);
-    nModeField[1] = frequencyShiftImag(t, omegaPhi, omegaR, Field[0], Field[1], mMode, nMode);
-
-    nModeFieldDeriv[0] = frequencyShiftReal(t, omegaPhi, omegaR, FieldDeriv[0], FieldDeriv[1], mMode, nMode);
-    nModeFieldDeriv[1] = frequencyShiftImag(t, omegaPhi, omegaR, FieldDeriv[0], FieldDeriv[1], mMode, nMode);
-    nModeFieldDeriv[2] = frequencyShiftReal(t, omegaPhi, omegaR, FieldDeriv[2], FieldDeriv[3], mMode, nMode);
-    nModeFieldDeriv[3] = frequencyShiftImag(t, omegaPhi, omegaR, FieldDeriv[2], FieldDeriv[3], mMode, nMode);
-    nModeFieldDeriv[4] = frequencyShiftReal(t, omegaPhi, omegaR, FieldDeriv[4], FieldDeriv[5], mMode, nMode);
-    nModeFieldDeriv[5] = frequencyShiftImag(t, omegaPhi, omegaR, FieldDeriv[4], FieldDeriv[5], mMode, nMode);
-    nModeFieldDeriv[6] = frequencyShiftReal(t, omegaPhi, omegaR, FieldDeriv[6], FieldDeriv[7], mMode, nMode);
-    nModeFieldDeriv[7] = frequencyShiftImag(t, omegaPhi, omegaR, FieldDeriv[6], FieldDeriv[7], mMode, nMode);
-
-    nModeEffSrc[0] = frequencyShiftReal(t, omegaPhi, omegaR, EffSrc[0], EffSrc[1], mMode, nMode);
-    nModeEffSrc[1] = frequencyShiftImag(t, omegaPhi, omegaR, EffSrc[0], EffSrc[1], mMode, nMode);
+    int lengthOfArray = sizeof(field) / sizeof(field[0]);
+    for (i = 0; i < lengthOfArray - 1; i += 2)
+    {
+        nModeField[i] = frequencyShiftReal(time, omegaPhi, omegaR, field[i], field[i + 1], mMode, nMode);
+        nModeField[i + 1] = frequencyShiftImag(time, omegaPhi, omegaR, field[i], field[i + 1], mMode, nMode);
+    }
 }
+
+void generateKerrOrbitalParameters(korb_params *orbitalParameters, spin, semiLatusRectum, eccentricity, x){
+
+    int eccentric = e > 0.0 ? 1 : 0;
+    int inclined = fabs(1.0 - x) <= 1e-14 ? 0 : 1;
+    double error_tolerance = 1.0e-15;
+
+    korb_getparams(eccentric, inclined, spin, semiLatusRectum, eccentricity, x, error_tolerance, &orbpar);
+}
+
+
+
+
+
+
+
+
+
+
+
 
 int main(int argc, char *argv[])
 {
