@@ -1,6 +1,8 @@
 [submodule "lib/kerrgeodesics"]
 	path = lib/kerrgeodesics
 	url = git@github.com:thompsonphys/KerrGeodesicsC.git
+	branch = master
 [submodule "lib/effectivesource"]
 	path = lib/effectivesource
 	url = git@github.com:thompsonphys/EffectiveSource.git
+	branch = swig
