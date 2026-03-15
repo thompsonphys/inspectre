@@ -14,7 +14,8 @@ class EffectiveSource:
         Which effective-source module to use: "circular" or "equatorial".
     """
 
-    def __init__(self, spin, mass=1.0, mode="equatorial"):
+    def __init__(self, spin=0.0, mass=1.0, mode="equatorial", **kwargs):
+        super().__init__(**kwargs)
         if mode == "circular":
             import effsource_circular as _ef
         elif mode == "equatorial":
@@ -52,6 +53,82 @@ class EffectiveSource:
         xp = self._ef.make_coordinate(t=0.0, r=r, theta=theta, phi=phi)
         self._ef.effsource_set_particle(xp, energy, lz, ur)
 
+    def phi_s(self, r_field, theta_field, phi_field):
+        """Compute the puncture at a field point.
+
+        Parameters
+        ----------
+        r_field, theta_field, phi_field : float
+            Field point position (t=0).
+
+        Returns
+        -------
+        float
+        """
+        xf = self._ef.make_coordinate(
+            t=0.0, r=r_field, theta=theta_field, phi=phi_field
+        )
+        PhiS = self._ef.calc_PhiS(xf)
+
+        return PhiS
+
+    def phi_s_m(self, m, r_field, theta_field):
+        """Compute the puncture at a field point.
+
+        Parameters
+        ----------
+        m : int
+            Azimuthal mode number.
+        r_field, theta_field : float
+            Field point position (t=0, phi=0).
+
+        Returns
+        -------
+        PhiS : ndarray shape (2,) — [Re, Im] singular field
+        """
+        xf = self._ef.make_coordinate(t=0.0, r=r_field, theta=theta_field, phi=0.0)
+        PhiS_m = self._ef.calc_PhiS_m(m, xf)
+
+        return PhiS_m
+
+    def source(self, r_field, theta_field, phi_field):
+        """Compute the effective source at a field point.
+
+        Parameters
+        ----------
+        r_field, theta_field, phi_field : float
+            Field point position (t=0).
+
+        Returns
+        -------
+        float
+        """
+        xf = self._ef.make_coordinate(
+            t=0.0, r=r_field, theta=theta_field, phi=phi_field
+        )
+        _, _, _, src = self._ef.calc(xf)
+
+        return src
+
+    def source_m(self, m, r_field, theta_field):
+        """Compute the effective source at a field point.
+
+        Parameters
+        ----------
+        m : int
+            Azimuthal mode number.
+        r_field, theta_field : float
+            Field point position (t=0, phi=0).
+
+        Returns
+        -------
+        PhiS : ndarray shape (2,) — [Re, Im] singular field
+        """
+        xf = self._ef.make_coordinate(t=0.0, r=r_field, theta=theta_field, phi=0.0)
+        _, _, _, src = self._ef.calc_m(m, xf)
+
+        return src
+
     def calc_m(self, m, r_field, theta_field):
         """Compute the m-mode effective source at a field point.
 
@@ -80,15 +157,13 @@ class EffectiveSource:
             "src": np.array(src),
         }
 
-    def calc(self, r_field, theta_field, phi_field=0.0):
+    def calc(self, r_field, theta_field, phi_field):
         """Compute the full (non-decomposed) effective source at a field point.
 
         Parameters
         ----------
-        r_field, theta_field : float
+        r_field, theta_field, phi_field : float
             Field point position (t=0).
-        phi_field: float, optional
-            Field point azimuthal position
 
         Returns
         -------

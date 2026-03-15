@@ -19,7 +19,16 @@ class KerrOrbit:
         Fourier series convergence tolerance, default 1e-15.
     """
 
-    def __init__(self, spin, semilatus_rectum, eccentricity, x=1.0, err=1e-15):
+    def __init__(
+        self,
+        spin=0.0,
+        semilatus_rectum=10.0,
+        eccentricity=0.0,
+        x=1.0,
+        err=1e-15,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
         self._params = _kg.korb_params()
         self._closed = False
 
@@ -27,8 +36,14 @@ class KerrOrbit:
         inclined = 0 if abs(1.0 - x) <= 1e-14 else 1
 
         _kg.korb_getparams(
-            eccentric, inclined, spin, semilatus_rectum, eccentricity, x,
-            err, self._params,
+            eccentric,
+            inclined,
+            spin,
+            semilatus_rectum,
+            eccentricity,
+            x,
+            err,
+            self._params,
         )
 
     # -- orbital constants --------------------------------------------------
