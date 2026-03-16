@@ -26,7 +26,7 @@ for _name, _src_dir in [
 kerrgeodesics_ext = Extension(
     "_kerrgeodesics",
     sources=[
-        os.path.join(kerr_rel, "kerrgeodesics.i"),
+        os.path.join(kerr_rel, "kerrgeodesics_wrap.c"),
         os.path.join(kerr_rel, "korb.c"),
     ],
     include_dirs=[prefix + "/include", kerr_abs],
@@ -34,7 +34,6 @@ kerrgeodesics_ext = Extension(
     runtime_library_dirs=[prefix + "/lib"],
     libraries=["m", "gsl", "gslcblas", "fftw3"],
     extra_compile_args=["-std=gnu99", "-O3"],
-    swig_opts=["-I" + kerr_abs],
 )
 
 effsource_circular_ext = Extension(

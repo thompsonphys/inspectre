@@ -2,13 +2,22 @@ from .geodesics import KerrOrbit
 from .source import EffectiveSource
 import numpy as np
 from scipy.interpolate import CubicSpline
+from scipy.interpolate import InterpolatedUnivariateSpline as IUS
 from copy import deepcopy
 
 
-def set_array(duration, num_pts):
-    delta = duration / (num_pts - 1)
-    time_array = np.arange(num_pts) * duration / (num_pts - 1)
-    return delta, time_array
+def set_array(duration, num_pts, buffer=0):
+    assert buffer >= 0
+
+    delta = duration / num_pts
+    
+    # duration inclusive time array
+    time_array = np.arange(-buffer, num_pts + buffer + 1) * delta
+    if buffer == 0:
+        mask = time_array == time_array
+    else:
+        mask = (time_array >= 0.0) & (time_array <= duration)
+    return delta, time_array, mask
 
 
 class Inspectre(KerrOrbit, EffectiveSource):
@@ -37,6 +46,7 @@ class Inspectre(KerrOrbit, EffectiveSource):
 
         self._trajectory_exists = False
         self._trajectory_resampled = False
+        self.BUFFER = 10
 
     def generate_equatorial_trajectory(self, num_periods=1, num_pts=100):
 
@@ -46,7 +56,9 @@ class Inspectre(KerrOrbit, EffectiveSource):
 
         total_duration = num_periods * self.mino_period_r
 
-        delta_lambda, lambda_values = set_array(total_duration, num_pts)
+        delta_lambda, lambda_values, lambda_mask = set_array(
+            total_duration, num_pts, buffer=self.BUFFER
+        )
 
         traj_data = []
         for lam in lambda_values:
@@ -62,14 +74,30 @@ class Inspectre(KerrOrbit, EffectiveSource):
 
         t_vals, r_vals, theta_vals, phi_vals, ur_vals = np.array(traj_data).T
 
+        # store full trajectory, including buffer, for later potential interpolation
+        self._trajectory_full = {
+            "metadata": {
+                "periods": num_periods,
+                "delta_lambda": delta_lambda,
+                "lambda_mask": lambda_mask,
+            },
+            "lambda":lambda_values,
+            "t":t_vals,
+            "r":r_vals,
+            "theta":theta_vals,
+            "phi":phi_vals,
+            "ur":ur_vals
+        }
+
+        # give requested range here
         self.trajectory = {
             "metadata": {"periods": num_periods, "delta_lambda": delta_lambda},
-            "lambda": lambda_values,
-            "t": t_vals,
-            "r": r_vals,
-            "theta": theta_vals,
-            "phi": phi_vals,
-            "ur": ur_vals,
+            "lambda": lambda_values[lambda_mask],
+            "t": t_vals[lambda_mask],
+            "r": r_vals[lambda_mask],
+            "theta": theta_vals[lambda_mask],
+            "phi": phi_vals[lambda_mask],
+            "ur": ur_vals[lambda_mask],
         }
         self._trajectory_exists = True
 
@@ -77,35 +105,26 @@ class Inspectre(KerrOrbit, EffectiveSource):
         if not self._trajectory_exists:
             raise ValueError("Please first generate a trajectory.")
 
-    def resample_trajectory(self, num_pts=100):
+    def resample_trajectory(self, num_pts=100, indep_var = "t"):
+        # resample either in lambda or t, let user decide independent variable
 
         self.check_trajectory()
 
-        if self._trajectory_resampled:
-            # copy back old trajectory to re-do sampling
-            self.trajectory = deepcopy(self._old_traj)
-            del self._old_traj
-            self._trajectory_resampled = False
+        old_duration = self.trajectory[indep_var][-1]
 
-        self._old_traj = deepcopy(self.trajectory)
+        new_delta, new_indep_var, _ = set_array(old_duration, num_pts, buffer=0)
 
-        old_time = self.trajectory["t"]
+        self.trajectory[indep_var] = new_indep_var
+        old_indep_var_full = self._trajectory_full[indep_var]
 
-        new_delta_t, new_times = set_array(old_time[-1], num_pts)
-
-        self.trajectory["t"] = new_times
-
-        for k, coord in self.trajectory.items():
-            if k == "t" or k == "metadata":
+        # spline over the trajectory with boundary buffer
+        for k, coord in self._trajectory_full.items():
+            if k in set([indep_var, "metadata"]):
                 continue
 
-            self.trajectory[k] = CubicSpline(old_time, coord)(new_times)
+            self.trajectory[k] = CubicSpline(old_indep_var_full, coord)(new_indep_var)
 
-        del self.trajectory["metadata"]["delta_lambda"]
-
-        self.trajectory["metadata"]["delta_t"] = new_delta_t
-
-        self._trajectory_resampled = True
+        self.trajectory["metadata"][f"delta_{indep_var}"] = new_delta
 
     def puncture_along_trajectory(self, r_field, theta_field, phi_field):
 
@@ -184,17 +203,22 @@ class Inspectre(KerrOrbit, EffectiveSource):
 
         return np.array([self.trajectory["t"], field_values]).T
 
-    def source_mmode_along_trajectory(self, m, r_field, theta_field):
+    def source_mmode_along_trajectory(self, m, r_field, theta_field, full_traj=False):
 
         self.check_trajectory()
 
         field_values = []
+        if full_traj:
+            traj_dict = self._trajectory_full
+        else:
+            traj_dict = self.trajectory
+
         zipped_coords = zip(
-            self.trajectory["t"],
-            self.trajectory["r"],
-            self.trajectory["theta"],
-            self.trajectory["phi"],
-            self.trajectory["ur"],
+            traj_dict["t"],
+            traj_dict["r"],
+            traj_dict["theta"],
+            traj_dict["phi"],
+            traj_dict["ur"],
         )
         for t_p, r_p, theta_p, phi_p, ur in zipped_coords:
             self.set_particle(
@@ -204,11 +228,10 @@ class Inspectre(KerrOrbit, EffectiveSource):
             field_values.append([t_p, re, im])
 
         return np.array(field_values)
-    
 
-    def source_mn_integrand_along_trajectory(self, m, n, r_field, theta_field):
+    def source_mn_integrand_along_trajectory(self, m, n, r_field, theta_field, full_traj=False):
 
-        m_mode_data = self.source_mmode_along_trajectory(m, r_field, theta_field)
+        m_mode_data = self.source_mmode_along_trajectory(m, r_field, theta_field, full_traj=full_traj)
 
         t, re, im = m_mode_data.T
         angular_frequency = m * self.omega_phi + n * self.omega_r
