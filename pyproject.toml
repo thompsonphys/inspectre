@@ -7,10 +7,7 @@ name = "inspectre"
 version = "0.1.0"
 description = "Effective source calculations for scalar particles in Kerr spacetime"
 requires-python = ">=3.8"
-dependencies = ["numpy", "scipy"]
+dependencies = ["numpy", "scipy", "kerrgeodesics", "effsource"]
 
 [tool.setuptools.packages.find]
 include = ["inspectre*"]
-
-[tool.setuptools]
-py-modules = ["kerrgeodesics", "effsource_circular", "effsource_equatorial"]

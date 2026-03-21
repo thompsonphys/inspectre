@@ -17,24 +17,24 @@ class EffectiveSource:
     def __init__(self, spin=0.0, mass=1.0, mode="equatorial", **kwargs):
         super().__init__(**kwargs)
         if mode == "circular":
-            import effsource_circular as _ef
+            from effsource_circular import EffsourceCircularContext, disable_gsl_error_handler
+            self._ef = EffsourceCircularContext(mass, spin)
+            disable_gsl_error_handler()
         elif mode == "equatorial":
-            import effsource_equatorial as _ef
+            from effsource_equatorial import EffsourceEquatorialContext, disable_gsl_error_handler
+            self._ef = EffsourceEquatorialContext(mass, spin)
+            disable_gsl_error_handler()
         else:
             raise ValueError(f"mode must be 'circular' or 'equatorial', got {mode!r}")
-
-        self._ef = _ef
-        self._ef.disable_gsl_error_handler()
-        self._ef.effsource_init(mass, spin)
 
     @staticmethod
     def make_coordinate(t, r, theta, phi):
         """Create a coordinate struct. Uses whichever effsource module is available."""
         try:
-            import effsource_equatorial as _ef
+            from effsource_equatorial import make_coordinate
         except ImportError:
-            import effsource_circular as _ef
-        return _ef.make_coordinate(t=t, r=r, theta=theta, phi=phi)
+            from effsource_circular import make_coordinate
+        return make_coordinate(t=t, r=r, theta=theta, phi=phi)
 
     def set_particle(self, r, theta, phi, energy, lz, ur):
         """Set the particle position and orbital parameters.
@@ -50,8 +50,8 @@ class EffectiveSource:
         ur : float
             Radial component of four-velocity u^r.
         """
-        xp = self._ef.make_coordinate(t=0.0, r=r, theta=theta, phi=phi)
-        self._ef.effsource_set_particle(xp, energy, lz, ur)
+        xp = self.make_coordinate(t=0.0, r=r, theta=theta, phi=phi)
+        self._ef.set_particle(xp, energy, lz, ur)
 
     def phi_s(self, r_field, theta_field, phi_field):
         """Compute the puncture at a field point.
@@ -65,7 +65,7 @@ class EffectiveSource:
         -------
         float
         """
-        xf = self._ef.make_coordinate(
+        xf = self.make_coordinate(
             t=0.0, r=r_field, theta=theta_field, phi=phi_field
         )
         PhiS = self._ef.calc_PhiS(xf)
@@ -86,7 +86,7 @@ class EffectiveSource:
         -------
         PhiS : ndarray shape (2,) — [Re, Im] singular field
         """
-        xf = self._ef.make_coordinate(t=0.0, r=r_field, theta=theta_field, phi=0.0)
+        xf = self.make_coordinate(t=0.0, r=r_field, theta=theta_field, phi=0.0)
         PhiS_m = self._ef.calc_PhiS_m(m, xf)
 
         return PhiS_m
@@ -103,7 +103,7 @@ class EffectiveSource:
         -------
         float
         """
-        xf = self._ef.make_coordinate(
+        xf = self.make_coordinate(
             t=0.0, r=r_field, theta=theta_field, phi=phi_field
         )
         _, _, _, src = self._ef.calc(xf)
@@ -124,7 +124,7 @@ class EffectiveSource:
         -------
         PhiS : ndarray shape (2,) — [Re, Im] singular field
         """
-        xf = self._ef.make_coordinate(t=0.0, r=r_field, theta=theta_field, phi=0.0)
+        xf = self.make_coordinate(t=0.0, r=r_field, theta=theta_field, phi=0.0)
         _, _, _, src = self._ef.calc_m(m, xf)
 
         return src
@@ -147,7 +147,7 @@ class EffectiveSource:
             d2PhiS : ndarray shape (10, 2) — second derivatives (Re/Im interleaved)
             src : ndarray shape (2,) — [Re, Im] effective source
         """
-        xf = self._ef.make_coordinate(t=0.0, r=r_field, theta=theta_field, phi=0.0)
+        xf = self.make_coordinate(t=0.0, r=r_field, theta=theta_field, phi=0.0)
         PhiS, dPhiS, d2PhiS, src = self._ef.calc_m(m, xf)
 
         return {
@@ -173,7 +173,7 @@ class EffectiveSource:
             d2PhiS : ndarray shape (10,) — second derivatives
             src : float — effective source
         """
-        xf = self._ef.make_coordinate(
+        xf = self.make_coordinate(
             t=0.0, r=r_field, theta=theta_field, phi=phi_field
         )
         PhiS, dPhiS, d2PhiS, src = self._ef.calc(xf)

@@ -105,26 +105,44 @@ class Inspectre(KerrOrbit, EffectiveSource):
         if not self._trajectory_exists:
             raise ValueError("Please first generate a trajectory.")
 
-    def resample_trajectory(self, num_pts=100, indep_var = "t"):
+    def resample_trajectory(self, new_indep_array = None, num_pts=100, indep_var = "t"):
         # resample either in lambda or t, let user decide independent variable
 
         self.check_trajectory()
 
-        old_duration = self.trajectory[indep_var][-1]
+        if new_indep_array is None:
 
-        new_delta, new_indep_var, _ = set_array(old_duration, num_pts, buffer=0)
+            old_duration = self.trajectory[indep_var][-1]
 
-        self.trajectory[indep_var] = new_indep_var
-        old_indep_var_full = self._trajectory_full[indep_var]
+            new_delta, new_indep_var, _ = set_array(old_duration, num_pts, buffer=0)
 
-        # spline over the trajectory with boundary buffer
-        for k, coord in self._trajectory_full.items():
-            if k in set([indep_var, "metadata"]):
-                continue
+            self.trajectory[indep_var] = new_indep_var
+            old_indep_var_full = self._trajectory_full[indep_var]
 
-            self.trajectory[k] = CubicSpline(old_indep_var_full, coord)(new_indep_var)
+            # spline over the trajectory with boundary buffer
+            for k, coord in self._trajectory_full.items():
+                if k in set([indep_var, "metadata"]):
+                    continue
 
-        self.trajectory["metadata"][f"delta_{indep_var}"] = new_delta
+                self.trajectory[k] = CubicSpline(old_indep_var_full, coord)(new_indep_var)
+
+            self.trajectory["metadata"][f"delta_{indep_var}"] = new_delta
+        else:
+            start = self.trajectory[indep_var][0]
+            end = self.trajectory[indep_var][-1]
+            assert (new_indep_array[0] >= start) and (new_indep_array[-1] <= end)
+
+            self.trajectory[indep_var] = new_indep_array
+            old_indep_var_full = self._trajectory_full[indep_var]
+
+            # spline over the trajectory with boundary buffer
+            for k, coord in self._trajectory_full.items():
+                if k in set([indep_var, "metadata"]):
+                    continue
+
+                self.trajectory[k] = CubicSpline(old_indep_var_full, coord)(new_indep_array)
+
+            self.trajectory["metadata"][f"delta_{indep_var}"] = None
 
     def puncture_along_trajectory(self, r_field, theta_field, phi_field):
 
