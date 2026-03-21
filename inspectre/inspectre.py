@@ -1,4 +1,4 @@
-from .geodesics import KerrOrbit
+from kerrgeodesics import KerrOrbit
 from .source import EffectiveSource
 import numpy as np
 from scipy.interpolate import CubicSpline

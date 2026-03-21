@@ -11,22 +11,10 @@ effs_rel = os.path.join("lib", "effectivesource")
 kerr_abs = os.path.join(_here, kerr_rel)
 effs_abs = os.path.join(_here, effs_rel)
 
-# Copy the pre-generated SWIG .py files from submodule dirs to root so
-# setuptools can find them as py-modules.
-for _name, _src_dir in [
-    ("kerrgeodesics.py", kerr_abs),
-    ("effsource_circular.py", effs_abs),
-    ("effsource_equatorial.py", effs_abs),
-]:
-    _src = os.path.join(_src_dir, _name)
-    _dst = os.path.join(_here, _name)
-    if os.path.exists(_src):
-        shutil.copy2(_src, _dst)
-
 kerrgeodesics_ext = Extension(
     "_kerrgeodesics",
     sources=[
-        os.path.join(kerr_rel, "kerrgeodesics_wrap.c"),
+        os.path.join(kerr_rel, "kerrgeodesics.i"),
         os.path.join(kerr_rel, "korb.c"),
     ],
     include_dirs=[prefix + "/include", kerr_abs],
@@ -39,7 +27,7 @@ kerrgeodesics_ext = Extension(
 effsource_circular_ext = Extension(
     "_effsource_circular",
     sources=[
-        os.path.join(effs_rel, "effsource_circular_wrap.c"),
+        os.path.join(effs_rel, "effsource_circular.i"),
         os.path.join(effs_rel, "kerr-circular.c"),
     ],
     include_dirs=[prefix + "/include", effs_abs],
@@ -52,7 +40,7 @@ effsource_circular_ext = Extension(
 effsource_equatorial_ext = Extension(
     "_effsource_equatorial",
     sources=[
-        os.path.join(effs_rel, "effsource_equatorial_wrap.c"),
+        os.path.join(effs_rel, "effsource_equatorial.i"),
         os.path.join(effs_rel, "kerr-equatorial.c"),
         os.path.join(effs_rel, "kerr-equatorial-coeffs.c"),
         os.path.join(effs_rel, "kerr-equatorial-dtcoeffs.c"),
@@ -72,10 +60,19 @@ class CustomBuildExt(build_ext):
 
     def run(self):
         super().run()
-        src = os.path.join(kerr_abs, "kerrgeodesics.py")
-        dst = os.path.join(_here, "kerrgeodesics.py")
-        if os.path.exists(src):
-            shutil.copy2(src, dst)
+        for fname in [
+            "kerrgeodesics.py",
+            "effsource_circular.py",
+            "effsource_equatorial.py",
+        ]:
+            if "kerr" in fname:
+                _abs = kerr_abs
+            else:
+                _abs = effs_abs
+            src = os.path.join(_abs, fname)
+            dst = os.path.join(_here, fname)
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
 
 
 setup(
