@@ -1,4 +1,10 @@
 import numpy as np
+from effsource_equatorial import (
+    make_coordinate,
+    EffsourceEquatorialContext,
+    disable_gsl_error_handler,
+)
+from effsource_circular import EffsourceContext
 
 
 class EffectiveSource:
@@ -14,14 +20,15 @@ class EffectiveSource:
         Which effective-source module to use: "circular" or "equatorial".
     """
 
-    def __init__(self, spin=0.0, mass=1.0, mode="equatorial", **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, mass=1.0, spin=0.0, mode="equatorial", **kwargs):
+        self.mode = mode
+        self.mass = mass
+        self.spin = spin
+
         if mode == "circular":
-            from effsource_circular import EffsourceCircularContext, disable_gsl_error_handler
-            self._ef = EffsourceCircularContext(mass, spin)
+            self._ef = EffsourceContext(mass, spin)
             disable_gsl_error_handler()
         elif mode == "equatorial":
-            from effsource_equatorial import EffsourceEquatorialContext, disable_gsl_error_handler
             self._ef = EffsourceEquatorialContext(mass, spin)
             disable_gsl_error_handler()
         else:
@@ -30,10 +37,7 @@ class EffectiveSource:
     @staticmethod
     def make_coordinate(t, r, theta, phi):
         """Create a coordinate struct. Uses whichever effsource module is available."""
-        try:
-            from effsource_equatorial import make_coordinate
-        except ImportError:
-            from effsource_circular import make_coordinate
+
         return make_coordinate(t=t, r=r, theta=theta, phi=phi)
 
     def set_particle(self, r, theta, phi, energy, lz, ur):
@@ -65,9 +69,7 @@ class EffectiveSource:
         -------
         float
         """
-        xf = self.make_coordinate(
-            t=0.0, r=r_field, theta=theta_field, phi=phi_field
-        )
+        xf = self.make_coordinate(t=0.0, r=r_field, theta=theta_field, phi=phi_field)
         PhiS = self._ef.calc_PhiS(xf)
 
         return PhiS
@@ -103,9 +105,7 @@ class EffectiveSource:
         -------
         float
         """
-        xf = self.make_coordinate(
-            t=0.0, r=r_field, theta=theta_field, phi=phi_field
-        )
+        xf = self.make_coordinate(t=0.0, r=r_field, theta=theta_field, phi=phi_field)
         _, _, _, src = self._ef.calc(xf)
 
         return src
@@ -173,9 +173,7 @@ class EffectiveSource:
             d2PhiS : ndarray shape (10,) — second derivatives
             src : float — effective source
         """
-        xf = self.make_coordinate(
-            t=0.0, r=r_field, theta=theta_field, phi=phi_field
-        )
+        xf = self.make_coordinate(t=0.0, r=r_field, theta=theta_field, phi=phi_field)
         PhiS, dPhiS, d2PhiS, src = self._ef.calc(xf)
 
         return {
