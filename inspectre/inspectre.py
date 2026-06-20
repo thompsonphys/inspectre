@@ -26,7 +26,7 @@ class Inspectre:
     def __init__(
         self,
         spin=0.0,
-        semilatus_rect=10.0,
+        semilatus_rectum=10.0,
         eccentricity=0.0,
         x=1.0,
         mass=1.0,
@@ -37,7 +37,7 @@ class Inspectre:
 
         self.orbit = KerrOrbit(
             spin=spin,
-            semilatus_rect=semilatus_rect,
+            semilatus_rectum=semilatus_rectum,
             eccentricity=eccentricity,
             x=x,
             err=err,
@@ -116,8 +116,8 @@ class Inspectre:
         return self.orbit.spin
 
     @property
-    def semilatus_rect(self):
-        return self.orbit.semilatus_rect
+    def semilatus_rectum(self):
+        return self.orbit.semilatus_rectum
 
     @property
     def eccentricity(self):

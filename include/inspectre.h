@@ -1,7 +1,7 @@
 #ifndef INSPECTRE_H
 #define INSPECTRE_H
 
-#include "../lib/kerrgeodesics/korb.h"
+#include "../../kerrgeodesics/korb.h"
 
 double fourVelocityXFunction(double spin, double semiLatusRectum, double eccentricity);
 double fourVelocity(double psi, double spin, double semiLatusRectum, double eccentricity, double energy);

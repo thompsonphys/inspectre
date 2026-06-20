@@ -8,7 +8,7 @@
 #include <gsl/gsl_roots.h>
 #include <gsl/gsl_odeiv2.h>
 
-#include "../lib/effectivesource/effsource.h"
+#include "../../effectivesource/effsource.h"
 #include "../include/inspectre.h"
 
 double fourVelocityXFunction(double spin, double semiLatusRectum, double eccentricity)

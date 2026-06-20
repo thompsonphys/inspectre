@@ -8,8 +8,8 @@
 #include <gsl/gsl_roots.h>
 #include <gsl/gsl_odeiv2.h>
 
-#include "../lib/kerrgeodesics/korb.h"
-#include "../lib/effectivesource/effsource.h"
+#include "../../kerrgeodesics/korb.h"
+#include "../../effectivesource/effsource.h"
 
 double xFuncInsp(double a, double p, double e)
 {
