@@ -5,21 +5,40 @@ LDFLAGS = -L$(PREFIX)/lib -Wl,-rpath,$(PREFIX)/lib
 LIBS = -lm -lgsl -lgslcblas -lfftw3
 MAKE = /usr/bin/make
 
-EFFSRCDIR = ../lib/effectivesource
+EFFSRCDIR = ../../effectivesource
 EFFSRCTESTDIR = $(EFFSRCDIR)/test
-KERRGEODIR = ../lib/kerrgeodesics
+KERRGEODIR = ../../kerrgeodesic
 INSPDIR = ../src/
 
-all : example
+# inspectre_lib + the kerr-equatorial context objects (built under src/) needed
+# by anything that calls the inspectre_lib eval/integration routines.
+INSPOBJS = $(INSPDIR)/inspectre_lib.o \
+  $(INSPDIR)/kerr-equatorial-ctx.o $(INSPDIR)/kerr-equatorial-coeffs-ctx.o \
+  $(INSPDIR)/kerr-equatorial-dtcoeffs-ctx.o $(INSPDIR)/kerr-equatorial-dttcoeffs-ctx.o
+EFFSRCOBJS = $(EFFSRCTESTDIR)/kerr-equatorial-dtcoeffs.o $(EFFSRCTESTDIR)/kerr-equatorial-dttcoeffs.o $(EFFSRCTESTDIR)/kerr-equatorial-coeffs.o $(EFFSRCTESTDIR)/kerr-equatorial.o
 
-example : example.o 
-	$(GCC) $(CFLAGS) -o ../bin/example example.o $(KERRGEODIR)/korb.o $(EFFSRCTESTDIR)/kerr-equatorial-dtcoeffs.o $(EFFSRCTESTDIR)/kerr-equatorial-dttcoeffs.o $(EFFSRCTESTDIR)/kerr-equatorial-coeffs.o $(EFFSRCTESTDIR)/kerr-equatorial.o $(LDFLAGS) $(LIBS)
+all : example numtest verify_lib
 
-example.o : example.c 
+example : example.o
+	$(GCC) $(CFLAGS) -o ../bin/example example.o $(KERRGEODIR)/korb.o $(EFFSRCOBJS) $(LDFLAGS) $(LIBS)
+
+example.o : example.c
 	$(GCC) $(CFLAGS) -O3 -c -o example.o example.c
 
+numtest : numtest.o
+	$(GCC) $(CFLAGS) -o ../bin/numtest numtest.o $(KERRGEODIR)/korb.o $(EFFSRCOBJS) $(INSPOBJS) $(LDFLAGS) $(LIBS)
+
+numtest.o : numtest.c ../include/inspectre.h
+	$(GCC) $(CFLAGS) -O3 -c -o numtest.o numtest.c
+
+verify_lib : verify_lib.o
+	$(GCC) $(CFLAGS) -o ../bin/verify_lib verify_lib.o $(KERRGEODIR)/korb.o $(EFFSRCOBJS) $(INSPOBJS) $(LDFLAGS) $(LIBS)
+
+verify_lib.o : verify_lib.c ../include/inspectre.h
+	$(GCC) $(CFLAGS) -O3 -c -o verify_lib.o verify_lib.c
+
 clean :
-	rm -rf example
+	rm -rf example numtest verify_lib
 	rm -rf *.o
 
 .PHONY : clean all

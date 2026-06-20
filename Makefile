@@ -5,9 +5,9 @@ LDFLAGS = -L$(PREFIX)/lib -Wl,-rpath,$(PREFIX)/lib
 LIBS = -lm -lgsl -lgslcblas
 MAKE = /usr/bin/make
 
-EFFSRCDIR = $(PWD)/lib/effectivesource
+EFFSRCDIR = $(PWD)/../effectivesource
 EFFSRCTESTDIR = $(EFFSRCDIR)/test
-KERRGEODIR = $(PWD)/lib/kerrgeodesics
+KERRGEODIR = $(PWD)/../kerrgeodesic
 SRCDIR = $(PWD)/src
 TESTDIR = $(PWD)/test
 
