@@ -246,6 +246,7 @@ int main(int argc, char *argv[])
     for (int ir = 0; ir < cfg.rFieldCount; ir++)
     {
         double rField = grid_val(cfg.rFieldMin, cfg.rFieldMax, cfg.rFieldCount, ir);
+        printf("Running data for r = %.10g\n", rField);
         for (int it = 0; it < cfg.thetaCount; it++)
         {
             double theta = grid_val(cfg.thetaMin, cfg.thetaMax, cfg.thetaCount, it);
