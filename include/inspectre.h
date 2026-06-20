@@ -73,17 +73,31 @@ typedef struct {
    single scalar selected by params->component. */
 double inspectre_nmode_integrand(double t, void *params);
 
+/* gsl_function: as inspectre_nmode_integrand but parameterized by Mino time
+   lambda. Evaluates (1) at lambda directly (no Brent inversion), frequency-shifts
+   using t(lambda), and multiplies by the time Jacobian dt/dlambda so that the
+   lambda-integral over [0, Vr] equals the coordinate-time integral over [0, Tr]. */
+double inspectre_nmode_integrand_lambda(double lambda, void *params);
+
 enum { INSPECTRE_INTEG_QAG        = 0,
        INSPECTRE_INTEG_TIMESERIES = 1,   /* trapezoid over the samples */
        INSPECTRE_INTEG_SIMPSON    = 2,   /* composite Simpson over the samples */
-       INSPECTRE_INTEG_SPLINE     = 3 }; /* gsl cubic-spline quadrature */
+       INSPECTRE_INTEG_SPLINE     = 3,   /* gsl cubic-spline quadrature */
+       INSPECTRE_INTEG_QAG_MINO   = 4,   /* adaptive QAG over Mino time lambda (no Brent) */
+       INSPECTRE_INTEG_MINO_SPLINE= 5 }; /* graded-lambda mesh at closest approach + spline */
 
-/* Driver. mode == INSPECTRE_INTEG_QAG: adaptive GSL QAG, evaluating (1) on
-   demand. The remaining modes integrate the precomputed samples (tSamples +
-   interleaved fieldSamples[2], derivSamples[8], srcSamples[2] per point):
-   INSPECTRE_INTEG_TIMESERIES trapezoid, INSPECTRE_INTEG_SIMPSON composite
-   Simpson, INSPECTRE_INTEG_SPLINE gsl cubic-spline quadrature. Outputs the
-   complex n-mode amplitudes (re/im interleaved like dPhiS). */
+/* Driver. mode == INSPECTRE_INTEG_QAG: adaptive GSL QAG over coordinate time,
+   evaluating (1) on demand (each eval Brent-inverts lambda(t)).
+   INSPECTRE_INTEG_TIMESERIES / SIMPSON / SPLINE integrate the precomputed samples
+   (tSamples + interleaved fieldSamples[2], derivSamples[8], srcSamples[2] per
+   point): trapezoid, composite Simpson, gsl cubic-spline quadrature respectively.
+
+   INSPECTRE_INTEG_QAG_MINO and INSPECTRE_INTEG_MINO_SPLINE are SELF-CONTAINED:
+   they sample the source internally over Mino time lambda (no Brent inversion)
+   and ignore tSamples/field/deriv/srcSamples (pass NULL). QAG_MINO is adaptive;
+   MINO_SPLINE places `nSamples` nodes graded toward closest approach and applies
+   the gsl spline quadrature. Outputs the complex n-mode amplitudes (re/im
+   interleaved like dPhiS). */
 void inspectre_integrate_nmode(int mode,
         struct effsource_equatorial_ctx *ctx, int mMode, int nMode,
         struct coordinate *xField, korb_params *orbpar,
@@ -92,5 +106,14 @@ void inspectre_integrate_nmode(int mode,
         double *tSamples, double *fieldSamples, double *derivSamples,
         double *srcSamples, int nSamples,
         double *nModePhiS, double *nModeDPhiS, double *nModesrc);
+
+/* FFT source n-mode amplitudes: one FFTW transform of S_m sampled on a uniform
+   periodic t-grid of N points yields the complex amplitude A_n for every n at
+   once. outRe[k]/outIm[k] (length N) hold mode n = (k <= N/2) ? k : k - N; for a
+   requested n read bin ((n % N) + N) % N. Requires |n| <= N/2 to be resolved. */
+void inspectre_fft_source_nmodes(struct effsource_equatorial_ctx *ctx, int mMode,
+        struct coordinate *xField, korb_params *orbpar,
+        double a, double p, double e, double omegaPhi, double omegaR,
+        int N, double *outRe, double *outIm);
 
 #endif /* INSPECTRE_H */

@@ -17,7 +17,7 @@ INSPOBJS = $(INSPDIR)/inspectre_lib.o \
   $(INSPDIR)/kerr-equatorial-dtcoeffs-ctx.o $(INSPDIR)/kerr-equatorial-dttcoeffs-ctx.o
 EFFSRCOBJS = $(EFFSRCTESTDIR)/kerr-equatorial-dtcoeffs.o $(EFFSRCTESTDIR)/kerr-equatorial-dttcoeffs.o $(EFFSRCTESTDIR)/kerr-equatorial-coeffs.o $(EFFSRCTESTDIR)/kerr-equatorial.o
 
-all : example numtest verify_lib
+all : example numtest verify_lib scantest
 
 example : example.o
 	$(GCC) $(CFLAGS) -o ../bin/example example.o $(KERRGEODIR)/korb.o $(EFFSRCOBJS) $(LDFLAGS) $(LIBS)
@@ -37,8 +37,14 @@ verify_lib : verify_lib.o
 verify_lib.o : verify_lib.c ../include/inspectre.h
 	$(GCC) $(CFLAGS) -O3 -c -o verify_lib.o verify_lib.c
 
+scantest : scantest.o
+	$(GCC) $(CFLAGS) -o ../bin/scantest scantest.o $(KERRGEODIR)/korb.o $(EFFSRCOBJS) $(INSPOBJS) $(LDFLAGS) $(LIBS)
+
+scantest.o : scantest.c ../include/inspectre.h
+	$(GCC) $(CFLAGS) -O3 -c -o scantest.o scantest.c
+
 clean :
-	rm -rf example numtest verify_lib
+	rm -rf example numtest verify_lib scantest
 	rm -rf *.o
 
 .PHONY : clean all
