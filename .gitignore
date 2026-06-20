@@ -9,3 +9,5 @@ __pycache__
 effsource_circular.py 
 effsource_equatorial.py 
 kerrgeodesics.py 
+logs
+test/scan_configs
