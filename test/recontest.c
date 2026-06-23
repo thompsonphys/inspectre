@@ -367,7 +367,7 @@ int main(int argc, char *argv[])
                 for (int c = 0; c < 8; c++) tsD[8*j+c] = ldPhiS[c];
                 tsS[2*j] = lsrc[0]; tsS[2*j+1] = lsrc[1];
             }
-            Sdir_l2 = Sdir_l2 / (double)nRecon;
+            Sdir_l2 = sqrt(Sdir_l2 / (double)nRecon);
             gsl_spline_free(latSpline);
             gsl_interp_accel_free(latAcc);
             /* closed periodic wrap point at t = Tr: copy the t=0 sample */
@@ -494,7 +494,7 @@ int main(int argc, char *argv[])
                                     rField, theta, methods[m].name, nMax,
                                     t, sre, sim, dirRe[j], dirIm[j]);
                     }
-                    err_l2 = err_l2 / (double)nRecon;
+                    err_l2 = sqrt(err_l2 / (double)nRecon);
 
                     fprintf(out, "%.10g,%.10g,%s,%d,%.6e,%.6e,%.6e\n",
                             rField, theta, methods[m].name, nMax,
