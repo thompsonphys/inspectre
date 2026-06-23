@@ -107,6 +107,60 @@ void inspectre_integrate_nmode(int mode,
         double *srcSamples, int nSamples,
         double *nModePhiS, double *nModeDPhiS, double *nModesrc);
 
+/* QAG iteration-limit tracking. inspectre_integrate_nmode increments an internal
+   counter each time a QAG / QAG_MINO component integration returns GSL_EMAXITER.
+   Reset before a batch, read after, to flag unreliable adaptive integrations
+   without changing the integrate signature or parsing stderr. */
+void inspectre_qag_limit_reset(void);
+long inspectre_qag_limit_count(void);
+
+/* ---------------------------------------------------------------------------
+ * Reusable Mino-time graded-mesh samples.
+ *
+ * The MINO_SPLINE node geometry and the RAW (unshifted, un-Jacobian-weighted)
+ * source samples at those nodes are independent of the mode number n -- only
+ * the per-n frequency shift differs. Build the samples once per field point
+ * with inspectre_mino_samples_build, then call inspectre_mino_samples_integrate
+ * once per n (cheap: frequency-shift + spline quadrature, no source evals).
+ * This is exactly what the self-contained INSPECTRE_INTEG_MINO_SPLINE branch of
+ * inspectre_integrate_nmode does internally for a single n.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    int     n;          /* node count (= nSamples) */
+    double  Tr, Vr;
+    double *lam;        /* [n]    graded Mino-time nodes */
+    double *t;          /* [n]    korb_tfromla(lam[i]) */
+    double *J;          /* [n]    dt/dlambda at lam[i] */
+    double *raw;        /* [12*n] raw components, contiguous-per-component:
+                           raw[c*n + i]; order PhiS re/im (0,1), dPhiS (2..9),
+                           src re/im (10,11) */
+} inspectre_mino_samples;
+
+/* Build the graded mesh + raw source samples (the only source-evaluating step).
+   Caller frees with inspectre_mino_samples_free. */
+void inspectre_mino_samples_build(struct effsource_equatorial_ctx *ctx, int mMode,
+        struct coordinate *xField, korb_params *orbpar,
+        double a, double p, double e, int nSamples,
+        inspectre_mino_samples *out);
+
+void inspectre_mino_samples_free(inspectre_mino_samples *s);
+
+/* Frequency-shift the prebuilt samples for mode n and spline-integrate. No
+   source evals; reuses the n-independent samples from _build. Outputs the
+   complex n-mode amplitudes (re/im interleaved like dPhiS). */
+void inspectre_mino_samples_integrate(const inspectre_mino_samples *s,
+        int mMode, int nMode, double omegaPhi, double omegaR,
+        double *nModePhiS, double *nModeDPhiS, double *nModesrc);
+
+/* As _integrate, but integrate g(t) directly over the non-uniform node times
+   t[] with a plain sample rule instead of the lambda-spline quadrature (no
+   Jacobian weight). `rule` is one of INSPECTRE_INTEG_TIMESERIES (trapezoid),
+   INSPECTRE_INTEG_SIMPSON, or INSPECTRE_INTEG_SPLINE (spline over t). Tests how
+   the graded mesh fares under a non-spline non-uniform quadrature. */
+void inspectre_mino_samples_integrate_rule(const inspectre_mino_samples *s,
+        int mMode, int nMode, double omegaPhi, double omegaR, int rule,
+        double *nModePhiS, double *nModeDPhiS, double *nModesrc);
+
 /* FFT source n-mode amplitudes: one FFTW transform of S_m sampled on a uniform
    periodic t-grid of N points yields the complex amplitude A_n for every n at
    once. outRe[k]/outIm[k] (length N) hold mode n = (k <= N/2) ? k : k - N; for a

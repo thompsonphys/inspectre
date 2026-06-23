@@ -187,6 +187,13 @@ void inspectre_eval_at_time(struct effsource_equatorial_ctx *ctx, int mMode,
  * (2) n-mode Fourier amplitude integration
  * ========================================================================= */
 
+/* Count of QAG component integrations that hit GSL_EMAXITER since the last
+   reset. Lets callers (whose integrate signature must stay stable) detect
+   unreliable adaptive integrations without parsing stderr. */
+static long insp_qag_limit_hits = 0;
+void inspectre_qag_limit_reset(void) { insp_qag_limit_hits = 0; }
+long inspectre_qag_limit_count(void) { return insp_qag_limit_hits; }
+
 /* Pick scalar `c` out of the 12 n-mode components:
      0,1   -> field re/im
      2..9  -> derivatives
@@ -289,6 +296,190 @@ static void insp_spline_quad(const double *x, const double *comp, int n,
     gsl_interp_accel_free(acc);
 }
 
+/* Composite trapezoid quadrature of each of the 12 components against abscissa
+   x[0..n-1], normalized by Tr. Handles non-uniform spacing (uses each interval's
+   own dx), so it works on the uniform-t driver grid and the graded Mino mesh
+   alike. comp[c*n + i] is component c at node i. */
+static void insp_quad_trap(const double *x, const double *comp, int n,
+                           double Tr, double *res)
+{
+    for (int c = 0; c < 12; c++) res[c] = 0.0;
+    for (int i = 1; i < n; i++)
+    {
+        double dt = x[i] - x[i - 1];
+        for (int c = 0; c < 12; c++)
+            res[c] += 0.5 * (comp[c * n + i - 1] + comp[c * n + i]) * dt;
+    }
+    for (int c = 0; c < 12; c++) res[c] /= Tr;
+}
+
+/* Composite Simpson quadrature in the general unequal-spacing form (reduces to
+   the 1/3 rule on a uniform grid), normalized by Tr. If the interval count
+   (n-1) is odd, the trailing single interval is closed with the trapezoid rule.
+   Handles non-uniform spacing, so it also works on the graded Mino mesh. */
+static void insp_quad_simpson(const double *x, const double *comp, int n,
+                              double Tr, double *res)
+{
+    for (int c = 0; c < 12; c++) res[c] = 0.0;
+    int i;
+    for (i = 0; i + 2 < n; i += 2)
+    {
+        double h0 = x[i + 1] - x[i];
+        double h1 = x[i + 2] - x[i + 1];
+        double w  = (h0 + h1) / 6.0;
+        for (int c = 0; c < 12; c++)
+        {
+            const double *f = &comp[c * n + i];
+            res[c] += w * ((2.0 - h1 / h0) * f[0]
+                         + (h0 + h1) * (h0 + h1) / (h0 * h1) * f[1]
+                         + (2.0 - h0 / h1) * f[2]);
+        }
+    }
+    if (i + 1 < n)   /* odd interval count: trapezoid on the last */
+    {
+        double dt = x[i + 1] - x[i];
+        for (int c = 0; c < 12; c++)
+            res[c] += 0.5 * (comp[c * n + i] + comp[c * n + i + 1]) * dt;
+    }
+    for (int c = 0; c < 12; c++) res[c] /= Tr;
+}
+
+/* ---------------------------------------------------------------------------
+ * Reusable Mino-time graded-mesh samples (build once, integrate per n).
+ * ------------------------------------------------------------------------- */
+
+void inspectre_mino_samples_build(struct effsource_equatorial_ctx *ctx, int mMode,
+        struct coordinate *xField, korb_params *orbpar,
+        double a, double p, double e, int nSamples,
+        inspectre_mino_samples *out)
+{
+    const int N = nSamples;
+    const double Vr = orbpar->Vr;
+
+    out->n  = N;
+    out->Vr = Vr;
+    out->Tr = korb_tfromla(Vr, *orbpar);
+
+    /* fine orbit-only pre-grid: build the cumulative node density (no source
+       evals here, just the trajectory) so we can equidistribute N nodes. */
+    int M = 8 * N; if (M < 4096) M = 4096;
+    double *preLam = malloc((size_t)M * sizeof(double));
+    double *cum    = malloc((size_t)M * sizeof(double));
+    double prevRho = 0.0;
+    for (int i = 0; i < M; i++)
+    {
+        double lam  = (double)i / (double)(M - 1) * Vr;
+        double r_p  = korb_rfrompsi(korb_psifromla(lam, *orbpar), *orbpar);
+        double dist = insp_distance(xField->r, xField->theta, r_p);
+        double floor = INSPECTRE_MINO_DIST_FLOOR * xField->r;  /* scale-relative clip */
+        if (dist < floor) dist = floor;
+        double rho  = 1.0 / pow(dist, INSPECTRE_MINO_GRADE_BETA);
+        preLam[i] = lam;
+        cum[i] = (i == 0) ? 0.0
+               : cum[i-1] + 0.5 * (prevRho + rho) * (lam - preLam[i-1]);
+        prevRho = rho;
+    }
+
+    /* invert lambda(cum) to place N nodes at equal cumulative-density steps */
+    gsl_interp_accel *iacc = gsl_interp_accel_alloc();
+    gsl_interp *inv = gsl_interp_alloc(gsl_interp_linear, M);
+    gsl_interp_init(inv, cum, preLam, M);
+    double cumTotal = cum[M - 1];
+
+    out->lam = malloc((size_t)N * sizeof(double));
+    out->t   = malloc((size_t)N * sizeof(double));
+    out->J   = malloc((size_t)N * sizeof(double));
+    out->raw = malloc((size_t)12 * N * sizeof(double));
+    for (int k = 0; k < N; k++)
+    {
+        double lam = (k == 0)     ? 0.0
+                   : (k == N - 1) ? Vr
+                   : gsl_interp_eval(inv, cum, preLam,
+                                     (double)k / (double)(N - 1) * cumTotal, iacc);
+        out->lam[k] = lam;
+
+        double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
+        inspectre_eval_at_lambda(ctx, mMode, xField, lam, orbpar, a, p, e,
+                                 PhiS, dPhiS, ddPhiS, src);
+        out->t[k] = korb_tfromla(lam, *orbpar);
+        out->J[k] = insp_dtdlambda(lam, orbpar);
+        /* raw, unshifted components, contiguous per component */
+        out->raw[0 * N + k] = PhiS[0];
+        out->raw[1 * N + k] = PhiS[1];
+        for (int c = 0; c < 8; c++)
+            out->raw[(2 + c) * N + k] = dPhiS[c];
+        out->raw[10 * N + k] = src[0];
+        out->raw[11 * N + k] = src[1];
+    }
+
+    gsl_interp_free(inv);
+    gsl_interp_accel_free(iacc);
+    free(preLam); free(cum);
+}
+
+void inspectre_mino_samples_free(inspectre_mino_samples *s)
+{
+    free(s->lam); free(s->t); free(s->J); free(s->raw);
+    s->lam = s->t = s->J = s->raw = NULL;
+    s->n = 0;
+}
+
+void inspectre_mino_samples_integrate(const inspectre_mino_samples *s,
+        int mMode, int nMode, double omegaPhi, double omegaR,
+        double *nModePhiS, double *nModeDPhiS, double *nModesrc)
+{
+    const int N = s->n;
+    double res[12];
+    double *comp = malloc((size_t)12 * N * sizeof(double));
+    for (int k = 0; k < N; k++)
+    {
+        double Field[2] = { s->raw[0 * N + k], s->raw[1 * N + k] };
+        double Deriv[8];
+        for (int c = 0; c < 8; c++) Deriv[c] = s->raw[(2 + c) * N + k];
+        double Src[2] = { s->raw[10 * N + k], s->raw[11 * N + k] };
+
+        double nField[2], nDeriv[8], nSrc[2];
+        generateNModeIntegrands(s->t[k], omegaPhi, omegaR, mMode, nMode,
+                                Field, Deriv, Src, nField, nDeriv, nSrc);
+        for (int c = 0; c < 12; c++)
+            comp[c * N + k] = insp_select_component(c, nField, nDeriv, nSrc) * s->J[k];
+    }
+    insp_spline_quad(s->lam, comp, N, s->Tr, res);
+    free(comp);
+    insp_store_results(res, nModePhiS, nModeDPhiS, nModesrc);
+}
+
+void inspectre_mino_samples_integrate_rule(const inspectre_mino_samples *s,
+        int mMode, int nMode, double omegaPhi, double omegaR, int rule,
+        double *nModePhiS, double *nModeDPhiS, double *nModesrc)
+{
+    const int N = s->n;
+    double res[12];
+    double *comp = malloc((size_t)12 * N * sizeof(double));
+    for (int k = 0; k < N; k++)
+    {
+        double Field[2] = { s->raw[0 * N + k], s->raw[1 * N + k] };
+        double Deriv[8];
+        for (int c = 0; c < 8; c++) Deriv[c] = s->raw[(2 + c) * N + k];
+        double Src[2] = { s->raw[10 * N + k], s->raw[11 * N + k] };
+
+        double nField[2], nDeriv[8], nSrc[2];
+        generateNModeIntegrands(s->t[k], omegaPhi, omegaR, mMode, nMode,
+                                Field, Deriv, Src, nField, nDeriv, nSrc);
+        /* integrate g(t) directly over the non-uniform node times t[]: NO
+           Jacobian here (the dt/dlambda weight is only for the lambda-
+           parametrized spline path). This tests the graded mesh under a plain
+           non-uniform-sample rule instead of the cubic-spline quadrature. */
+        for (int c = 0; c < 12; c++)
+            comp[c * N + k] = insp_select_component(c, nField, nDeriv, nSrc);
+    }
+    if      (rule == INSPECTRE_INTEG_SIMPSON) insp_quad_simpson(s->t, comp, N, s->Tr, res);
+    else if (rule == INSPECTRE_INTEG_SPLINE)  insp_spline_quad(s->t, comp, N, s->Tr, res);
+    else                                      insp_quad_trap(s->t, comp, N, s->Tr, res);
+    free(comp);
+    insp_store_results(res, nModePhiS, nModeDPhiS, nModesrc);
+}
+
 void inspectre_integrate_nmode(int mode,
         struct effsource_equatorial_ctx *ctx, int mMode, int nMode,
         struct coordinate *xField, korb_params *orbpar,
@@ -330,8 +521,14 @@ void inspectre_integrate_nmode(int mode,
             /* error handler is off, so a nonzero status would otherwise be
                swallowed (result left at 0). GSL_EROUND just means the tolerance
                is tighter than the roundoff floor; keep the best estimate. */
-            if (st && st != GSL_EROUND)
-                fprintf(stderr, "[qag] c=%d status=%d (%s)\n", c, st, gsl_strerror(st));
+            if (st == GSL_EMAXITER) {
+                insp_qag_limit_hits++;
+                fprintf(stderr, "[qag] n=%d c=%d hit iteration limit (%zu) -- "
+                        "result may be inaccurate\n", nMode, c, QAG_LIMIT);
+            }
+            else if (st && st != GSL_EROUND)
+                fprintf(stderr, "[qag] n=%d c=%d status=%d (%s)\n",
+                        nMode, c, st, gsl_strerror(st));
             res[c] = result / Tr;
         }
 
@@ -361,8 +558,14 @@ void inspectre_integrate_nmode(int mode,
             ip.component = c;
             int st = gsl_integration_qag(&F, 0.0, orbpar->Vr, epsabs, epsrel, QAG_LIMIT,
                                 GSL_INTEG_GAUSS61, w, &result, &abserr);
-            if (st && st != GSL_EROUND)
-                fprintf(stderr, "[qag_mino] c=%d status=%d (%s)\n", c, st, gsl_strerror(st));
+            if (st == GSL_EMAXITER) {
+                insp_qag_limit_hits++;
+                fprintf(stderr, "[qag_mino] n=%d c=%d hit iteration limit (%zu) -- "
+                        "result may be inaccurate\n", nMode, c, QAG_LIMIT);
+            }
+            else if (st && st != GSL_EROUND)
+                fprintf(stderr, "[qag_mino] n=%d c=%d status=%d (%s)\n",
+                        nMode, c, st, gsl_strerror(st));
             res[c] = result / Tr;
         }
 
@@ -372,63 +575,16 @@ void inspectre_integrate_nmode(int mode,
     {
         /* Self-contained: place `nSamples` nodes in Mino time, graded toward
            closest approach (density ~ 1/dist^BETA), then spline-integrate the
-           Jacobian-weighted integrand over lambda. Ignores tSamples/field/etc. */
-        const int N = nSamples;
-        const double Vr = orbpar->Vr;
-
-        /* fine orbit-only pre-grid: build the cumulative node density (no source
-           evals here, just the trajectory) so we can equidistribute N nodes. */
-        int M = 8 * N; if (M < 4096) M = 4096;
-        double *preLam = malloc((size_t)M * sizeof(double));
-        double *cum    = malloc((size_t)M * sizeof(double));
-        double prevRho = 0.0;
-        for (int i = 0; i < M; i++)
-        {
-            double lam  = (double)i / (double)(M - 1) * Vr;
-            double r_p  = korb_rfrompsi(korb_psifromla(lam, *orbpar), *orbpar);
-            double dist = insp_distance(xField->r, xField->theta, r_p);
-            double floor = INSPECTRE_MINO_DIST_FLOOR * xField->r;  /* scale-relative clip */
-            if (dist < floor) dist = floor;
-            double rho  = 1.0 / pow(dist, INSPECTRE_MINO_GRADE_BETA);
-            preLam[i] = lam;
-            cum[i] = (i == 0) ? 0.0
-                   : cum[i-1] + 0.5 * (prevRho + rho) * (lam - preLam[i-1]);
-            prevRho = rho;
-        }
-
-        /* invert lambda(cum) to place N nodes at equal cumulative-density steps */
-        gsl_interp_accel *iacc = gsl_interp_accel_alloc();
-        gsl_interp *inv = gsl_interp_alloc(gsl_interp_linear, M);
-        gsl_interp_init(inv, cum, preLam, M);
-        double cumTotal = cum[M - 1];
-
-        double *lamNodes = malloc((size_t)N * sizeof(double));
-        double *comp = malloc((size_t)12 * N * sizeof(double));
-        for (int k = 0; k < N; k++)
-        {
-            double lam = (k == 0)     ? 0.0
-                       : (k == N - 1) ? Vr
-                       : gsl_interp_eval(inv, cum, preLam,
-                                         (double)k / (double)(N - 1) * cumTotal, iacc);
-            lamNodes[k] = lam;
-
-            double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
-            inspectre_eval_at_lambda(ctx, mMode, xField, lam, orbpar, a, p, e,
-                                     PhiS, dPhiS, ddPhiS, src);
-            double t = korb_tfromla(lam, *orbpar);
-            double J = insp_dtdlambda(lam, orbpar);
-            double nField[2], nDeriv[8], nSrc[2];
-            generateNModeIntegrands(t, omegaPhi, omegaR, mMode, nMode,
-                                    PhiS, dPhiS, src, nField, nDeriv, nSrc);
-            for (int c = 0; c < 12; c++)
-                comp[c * N + k] = insp_select_component(c, nField, nDeriv, nSrc) * J;
-        }
-
-        insp_spline_quad(lamNodes, comp, N, Tr, res);
-
-        gsl_interp_free(inv);
-        gsl_interp_accel_free(iacc);
-        free(preLam); free(cum); free(lamNodes); free(comp);
+           Jacobian-weighted integrand over lambda. Ignores tSamples/field/etc.
+           Build the n-independent samples then integrate this single n; callers
+           sweeping many n should build once and call _integrate per n. */
+        inspectre_mino_samples s;
+        inspectre_mino_samples_build(ctx, mMode, xField, orbpar, a, p, e,
+                                     nSamples, &s);
+        inspectre_mino_samples_integrate(&s, mMode, nMode, omegaPhi, omegaR,
+                                         nModePhiS, nModeDPhiS, nModesrc);
+        inspectre_mino_samples_free(&s);
+        return;
     }
     else /* sample-based methods integrate the precomputed samples */
     {
@@ -447,54 +603,11 @@ void inspectre_integrate_nmode(int mode,
         }
 
         if (mode == INSPECTRE_INTEG_SPLINE)
-        {
-            /* cubic-spline quadrature: fit each component vs t and integrate
-               the spline analytically over [t0, t_{N-1}]. */
             insp_spline_quad(tSamples, comp, nSamples, Tr, res);
-        }
         else if (mode == INSPECTRE_INTEG_SIMPSON)
-        {
-            /* composite Simpson over consecutive interval pairs, written in the
-               general unequal-spacing form (reduces to the 1/3 rule on the
-               uniform-t grid the driver is fed). If the interval count
-               (nSamples-1) is odd, the trailing single interval is closed with
-               the trapezoid rule. */
-            for (int c = 0; c < 12; c++) res[c] = 0.0;
-            int i;
-            for (i = 0; i + 2 < nSamples; i += 2)
-            {
-                double h0 = tSamples[i + 1] - tSamples[i];
-                double h1 = tSamples[i + 2] - tSamples[i + 1];
-                double w  = (h0 + h1) / 6.0;
-                for (int c = 0; c < 12; c++)
-                {
-                    double *f = &comp[c * nSamples + i];
-                    res[c] += w * ((2.0 - h1 / h0) * f[0]
-                                 + (h0 + h1) * (h0 + h1) / (h0 * h1) * f[1]
-                                 + (2.0 - h0 / h1) * f[2]);
-                }
-            }
-            if (i + 1 < nSamples)   /* odd interval count: trapezoid on the last */
-            {
-                double dt = tSamples[i + 1] - tSamples[i];
-                for (int c = 0; c < 12; c++)
-                    res[c] += 0.5 * (comp[c * nSamples + i]
-                                   + comp[c * nSamples + i + 1]) * dt;
-            }
-            for (int c = 0; c < 12; c++) res[c] /= Tr;
-        }
+            insp_quad_simpson(tSamples, comp, nSamples, Tr, res);
         else /* INSPECTRE_INTEG_TIMESERIES: trapezoid over the samples */
-        {
-            for (int c = 0; c < 12; c++) res[c] = 0.0;
-            for (int i = 1; i < nSamples; i++)
-            {
-                double dt = tSamples[i] - tSamples[i - 1];
-                for (int c = 0; c < 12; c++)
-                    res[c] += 0.5 * (comp[c * nSamples + i - 1]
-                                   + comp[c * nSamples + i]) * dt;
-            }
-            for (int c = 0; c < 12; c++) res[c] /= Tr;
-        }
+            insp_quad_trap(tSamples, comp, nSamples, Tr, res);
 
         free(comp);
     }
