@@ -5,6 +5,13 @@ from scipy.interpolate import CubicSpline
 from scipy.interpolate import InterpolatedUnivariateSpline as IUS
 from copy import deepcopy
 
+# Optional low-level C bindings (src/inspectre_lib.c). Built separately via the
+# project setup.py; the pure-Python methods below work without it.
+try:
+    import inspectre_c
+except ImportError:
+    inspectre_c = None
+
 
 def set_array(duration, num_pts, buffer=0):
     assert buffer >= 0
@@ -332,6 +339,92 @@ class Inspectre:
                 im * cos_omega_t + re * sin_omega_t,
             ]
         ).T
+
+    # -- Fast C bindings (inspectre_c) --------------------------------------
+    #
+    # These call the compiled routines in src/inspectre_lib.c directly, passing
+    # the raw korb_params / effsource_equatorial_ctx handles that this object
+    # already owns. They are equivalent to the pure-Python methods above but
+    # avoid the per-point Python overhead. Require the inspectre_c extension.
+
+    def _require_c(self):
+        if inspectre_c is None:
+            raise RuntimeError(
+                "inspectre_c extension not built; install it with "
+                "`pip install -e .` from the inspectre project root."
+            )
+
+    @property
+    def _ctx(self):
+        """Raw effsource_equatorial_ctx pointer (borrowed; owned by self.es)."""
+        return self.es._ef._ctx
+
+    @property
+    def _orbpar(self):
+        """Raw korb_params pointer (borrowed; owned by self.orbit)."""
+        return self.orbit._params
+
+    def eval_at_lambda_fast(self, m, lam, r_field, theta_field, phi_field=0.0):
+        """C eval of puncture + effective source at Mino time lambda.
+
+        Returns (PhiS[2], dPhiS[8], ddPhiS[20], src[2]) as lists (Re/Im interleaved).
+        """
+        self._require_c()
+        xF = self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+        return inspectre_c.eval_at_lambda(
+            self._ctx, m, xF, lam, self._orbpar,
+            self.spin, self.semilatus_rectum, self.eccentricity,
+        )
+
+    def eval_at_time_fast(self, m, t, r_field, theta_field, phi_field=0.0):
+        """C eval of puncture + effective source at coordinate time t.
+
+        Brent-inverts lambda(t) internally. Returns
+        (PhiS[2], dPhiS[8], ddPhiS[20], src[2]) as lists (Re/Im interleaved).
+        """
+        self._require_c()
+        xF = self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+        return inspectre_c.eval_at_time(
+            self._ctx, m, xF, t, self._orbpar,
+            self.spin, self.semilatus_rectum, self.eccentricity,
+        )
+
+    def lambda_from_t(self, t):
+        """Invert t = t(lambda) for lambda via the C Brent solver."""
+        self._require_c()
+        return inspectre_c.inspectre_lambda_from_t(t, self._orbpar)
+
+    def integrate_nmode_fast(self, m, n, r_field, theta_field, phi_field=0.0,
+                             mode=None, nSamples=257, epsabs=1e-10, epsrel=1e-10):
+        """C n-mode Fourier amplitude over one radial period.
+
+        `mode` defaults to the self-contained MINO_SPLINE quadrature; pass another
+        INSPECTRE_INTEG_* constant from inspectre_c to switch. Returns
+        (nModePhiS[2], nModeDPhiS[8], nModesrc[2]) as lists.
+        """
+        self._require_c()
+        if mode is None:
+            mode = inspectre_c.INSPECTRE_INTEG_MINO_SPLINE
+        xF = self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+        return inspectre_c.integrate_nmode(
+            mode, self._ctx, m, n, xF, self._orbpar,
+            self.spin, self.semilatus_rectum, self.eccentricity,
+            self.omega_phi, self.omega_r, epsabs, epsrel,
+            nSamples=nSamples,
+        )
+
+    def fft_source_nmodes_fast(self, m, r_field, theta_field, phi_field=0.0, N=256):
+        """C all-n source amplitudes from one FFTW transform.
+
+        Returns (outRe[N], outIm[N]); bin k holds mode n = k if k<=N/2 else k-N.
+        """
+        self._require_c()
+        xF = self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+        return inspectre_c.fft_source_nmodes(
+            self._ctx, m, xF, self._orbpar,
+            self.spin, self.semilatus_rectum, self.eccentricity,
+            self.omega_phi, self.omega_r, N,
+        )
 
     def source_along_trajectory(self, r_field, theta_field, phi_field):
 
