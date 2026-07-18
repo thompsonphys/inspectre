@@ -588,6 +588,25 @@ void inspectre_integrate_nmode(int mode,
     }
     else /* sample-based methods integrate the precomputed samples */
     {
+        /* These modes read the caller-supplied per-sample arrays directly; with
+           NULL arrays (or too few samples to form an interval) the loop below
+           would dereference NULL and crash the process. Fail loudly with NaN
+           outputs instead so a misuse is visible rather than fatal. */
+        if (!tSamples || !fieldSamples || !derivSamples || !srcSamples
+            || nSamples < 2)
+        {
+            fprintf(stderr, "[integrate_nmode] mode=%d n=%d requires tSamples + "
+                    "fieldSamples/derivSamples/srcSamples and nSamples>=2; got "
+                    "%s samples (nSamples=%d) -- returning NaN\n",
+                    mode, nMode,
+                    (tSamples && fieldSamples && derivSamples && srcSamples)
+                        ? "too few" : "NULL",
+                    nSamples);
+            for (int c = 0; c < 12; c++) res[c] = NAN;
+            insp_store_results(res, nModePhiS, nModeDPhiS, nModesrc);
+            return;
+        }
+
         /* per-sample n-mode component values, contiguous per component so the
            spline path can hand each component straight to gsl_spline_init:
            comp[c * nSamples + i] is component c at sample i. */

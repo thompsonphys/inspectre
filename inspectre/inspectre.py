@@ -394,24 +394,73 @@ class Inspectre:
         self._require_c()
         return inspectre_c.inspectre_lambda_from_t(t, self._orbpar)
 
+    # Integration modes that integrate caller-supplied per-sample arrays rather
+    # than sampling the source themselves. The C driver dereferences the sample
+    # pointers directly, so calling these with NULL arrays segfaults the process
+    # (and the Jupyter kernel) -- build the samples here before dispatching.
+    _SAMPLE_BASED_MODES = None  # populated lazily once inspectre_c is importable
+
     def integrate_nmode_fast(self, m, n, r_field, theta_field, phi_field=0.0,
                              mode=None, nSamples=257, epsabs=1e-10, epsrel=1e-10):
         """C n-mode Fourier amplitude over one radial period.
 
         `mode` defaults to the self-contained MINO_SPLINE quadrature; pass another
-        INSPECTRE_INTEG_* constant from inspectre_c to switch. Returns
-        (nModePhiS[2], nModeDPhiS[8], nModesrc[2]) as lists.
+        INSPECTRE_INTEG_* constant from inspectre_c to switch. The sample-based
+        modes (TIMESERIES, SIMPSON, SPLINE) integrate a precomputed timeseries; we
+        build it here on a closed uniform-t grid of `nSamples` points over one
+        radial period. Returns (nModePhiS[2], nModeDPhiS[8], nModesrc[2]) as lists.
         """
         self._require_c()
         if mode is None:
             mode = inspectre_c.INSPECTRE_INTEG_MINO_SPLINE
+        if Inspectre._SAMPLE_BASED_MODES is None:
+            Inspectre._SAMPLE_BASED_MODES = {
+                inspectre_c.INSPECTRE_INTEG_TIMESERIES,
+                inspectre_c.INSPECTRE_INTEG_SIMPSON,
+                inspectre_c.INSPECTRE_INTEG_SPLINE,
+            }
         xF = self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+
+        tSamples = fieldSamples = derivSamples = srcSamples = None
+        if mode in Inspectre._SAMPLE_BASED_MODES:
+            tSamples, fieldSamples, derivSamples, srcSamples = \
+                self._build_nmode_samples(m, r_field, theta_field, phi_field,
+                                          nSamples)
+
         return inspectre_c.integrate_nmode(
             mode, self._ctx, m, n, xF, self._orbpar,
             self.spin, self.semilatus_rectum, self.eccentricity,
             self.omega_phi, self.omega_r, epsabs, epsrel,
+            tSamples=tSamples, fieldSamples=fieldSamples,
+            derivSamples=derivSamples, srcSamples=srcSamples,
             nSamples=nSamples,
         )
+
+    def _build_nmode_samples(self, m, r_field, theta_field, phi_field, nSamples):
+        """Closed uniform-t timeseries of the puncture/source for sample-based
+        n-mode quadrature.
+
+        Returns (tSamples[N], fieldSamples[2N], derivSamples[8N], srcSamples[2N])
+        as flat lists in the interleaved layout the C driver expects. The grid is
+        the closed period [0, Tr] (t[0]=0, t[N-1]=Tr is the periodic image of t=0)
+        so the trapezoid/Simpson rules close the wrap interval -- matching the
+        reference sampling in test/recontest.c.
+        """
+        Tr = 2.0 * np.pi / self.omega_r
+        tSamples = [0.0] * nSamples
+        fieldSamples = [0.0] * (2 * nSamples)
+        derivSamples = [0.0] * (8 * nSamples)
+        srcSamples = [0.0] * (2 * nSamples)
+        for i in range(nSamples):
+            t = i / (nSamples - 1) * Tr
+            PhiS, dPhiS, _ddPhiS, src = self.eval_at_time_fast(
+                m, t, r_field, theta_field, phi_field)
+            tSamples[i] = t
+            fieldSamples[2 * i], fieldSamples[2 * i + 1] = PhiS[0], PhiS[1]
+            for c in range(8):
+                derivSamples[8 * i + c] = dPhiS[c]
+            srcSamples[2 * i], srcSamples[2 * i + 1] = src[0], src[1]
+        return tSamples, fieldSamples, derivSamples, srcSamples
 
     def fft_source_nmodes_fast(self, m, r_field, theta_field, phi_field=0.0, N=256):
         """C all-n source amplitudes from one FFTW transform.
