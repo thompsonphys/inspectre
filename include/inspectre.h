@@ -84,7 +84,9 @@ enum { INSPECTRE_INTEG_QAG        = 0,
        INSPECTRE_INTEG_SIMPSON    = 2,   /* composite Simpson over the samples */
        INSPECTRE_INTEG_SPLINE     = 3,   /* gsl cubic-spline quadrature */
        INSPECTRE_INTEG_QAG_MINO   = 4,   /* adaptive QAG over Mino time lambda (no Brent) */
-       INSPECTRE_INTEG_MINO_SPLINE= 5 }; /* graded-lambda mesh at closest approach + spline */
+       INSPECTRE_INTEG_MINO_SPLINE= 5,   /* graded-lambda mesh at closest approach + spline */
+       INSPECTRE_INTEG_PANEL_GL   = 6,   /* panels split at closest approach + Gauss-Legendre */
+       INSPECTRE_INTEG_FACT_CONV  = 7 }; /* seven-channel kernel factorization + convolution */
 
 /* Driver. mode == INSPECTRE_INTEG_QAG: adaptive GSL QAG over coordinate time,
    evaluating (1) on demand (each eval Brent-inverts lambda(t)).
@@ -159,6 +161,122 @@ void inspectre_mino_samples_integrate(const inspectre_mino_samples *s,
    the graded mesh fares under a non-spline non-uniform quadrature. */
 void inspectre_mino_samples_integrate_rule(const inspectre_mino_samples *s,
         int mMode, int nMode, double omegaPhi, double omegaR, int rule,
+        double *nModePhiS, double *nModeDPhiS, double *nModesrc);
+
+/* ---------------------------------------------------------------------------
+ * Panel Gauss-Legendre nodes split at the particle's closest approach.
+ *
+ * The n-mode integrand over one radial period is smooth except near the Mino
+ * times lambda_c where the particle passes closest to the field point: for
+ * field points the orbit actually crosses (theta = pi/2, r in [r_min, r_max])
+ * the source is only C^0 there and the puncture has a log(distance) profile;
+ * for off-orbit points the integrand is analytic but peaked on the scale of
+ * the minimum distance. Both lambda_c are known analytically from the orbit
+ * (psi_c = arccos((p/r_f - 1)/e)), so instead of grading a global mesh we
+ * split [0, Vr] into panels at the lambda_c and refine geometrically toward
+ * them (panel widths halving down to the peak's own lambda-scale, capped at
+ * maxLevels halvings), with a fixed-order Gauss-Legendre rule per panel.
+ * Off-orbit this resolves the peak exactly like a sinh map; at a crossing the
+ * geometric stack converges exponentially in the level count for the C^0/log
+ * endpoint behavior where a single global rule is stuck at low order.
+ *
+ * Like inspectre_mino_samples, the node set and the raw samples are
+ * n-independent: build once per field point, then integrate per n at the cost
+ * of a weighted phase sum (no further source evaluations).
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    int     n;          /* total node count */
+    double  Tr, Vr;
+    int     nBreak;     /* number of distinct closest-approach breakpoints (1 or 2) */
+    int     nNonFinite; /* non-finite raw samples zeroed during the build (deep
+                           near-zone source evals on innermost sliver nodes) */
+    double  lamBreak[2];/* breakpoint Mino times in [0, Vr) */
+    double  dlam[2];    /* lambda-scale of each peak (0 => exact crossing) */
+    double *lam;        /* [n] node Mino times (in [lamBreak[0], lamBreak[0]+Vr]) */
+    double *t;          /* [n] coordinate time at node, folded to the principal
+                           period (the full n-mode integrand is Tr-periodic) */
+    double *J;          /* [n] dt/dlambda at node */
+    double *w;          /* [n] quadrature weight (panel-scaled GL weight) */
+    double *raw;        /* [12*n] raw components, contiguous-per-component, same
+                           layout as inspectre_mino_samples.raw */
+} inspectre_panel_nodes;
+
+/* Build breakpoints, panels, GL nodes and raw source samples. `order` is the
+   Gauss-Legendre points per panel (e.g. 16); `maxLevels` caps the geometric
+   refinement toward each breakpoint (e.g. 40 => innermost panel ~ 1e-12 Vr).
+   `nMax` is the largest |n| the node set must resolve: panels are subdivided
+   until (|m| wphi + nMax wr) * dt_panel <= order, the Gauss-Legendre
+   resolution bound for the oscillatory carrier -- integrating beyond nMax
+   with these nodes silently degrades. Caller frees with
+   inspectre_panel_nodes_free. */
+void inspectre_panel_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
+        struct coordinate *xField, korb_params *orbpar,
+        double a, double p, double e, int order, int maxLevels, int nMax,
+        double omegaPhi, double omegaR,
+        inspectre_panel_nodes *out);
+
+void inspectre_panel_nodes_free(inspectre_panel_nodes *s);
+
+/* Frequency-shift the prebuilt panel samples for mode n and sum the quadrature.
+   No source evals. Outputs the complex n-mode amplitudes (re/im interleaved
+   like dPhiS). */
+void inspectre_panel_nodes_integrate(const inspectre_panel_nodes *s,
+        int mMode, int nMode, double omegaPhi, double omegaR,
+        double *nModePhiS, double *nModeDPhiS, double *nModesrc);
+
+/* ---------------------------------------------------------------------------
+ * Kernel-factorization n-modes (C port of inspectre/factorization.py).
+ *
+ * Every calc_m output splits exactly (effectivesource calc_m_split) into seven
+ * channels {A, L, P1..P5},
+ *     X_m(t) = A(t) + L(t) ln a(t) + sum_{q=1..5} Pq(t)/a(t)^q,
+ *     a(t)   = alpha20(t) dr(t)^2 + alpha02(t) dtheta^2,
+ * with every channel analytic (narrow-spectrum) along the worldline at a legal
+ * field point. The n-modes then follow by convolution against the FFTs of the
+ * six universal scalar kernels {ln a, 1/a, ..., 1/a^5} (orbit quantities only):
+ *     X_n = A^(n) + sum_ch sum_{k=-KG..KG} ch^(k) K_ch^(n-k).
+ * Like the panel nodes, the build is the only source-evaluating step (NB
+ * channel-split evaluations); each n then costs one 6x(2KG+1) complex dot per
+ * component. Kernel FFT coefficients are stored trimmed to |j| <= nMax + KG,
+ * so integration is exact for |n| <= nMax and silently truncated beyond.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    int     NB;         /* base-grid points (uniform in t; forced even) */
+    int     NK;         /* dense kernel FFT length used during the build */
+    int     KG;         /* convolution half-width (clamped to NB/2) */
+    int     nMax;       /* largest |n| the stored kernel coefficients resolve */
+    int     nKmax;      /* kernel coefficient bound = nMax + KG */
+    int     nNonFinite; /* non-finite channel/kernel samples zeroed in the build */
+    double  Tr, Vr;
+    double *chat;       /* [2*7*6*NB] channel Fourier coefficients, re/im
+                           interleaved: chat[2*((ch*6 + c)*NB + j)] with
+                           ch in {A,L,P1..P5}, c in {PhiS, dPhiS pairs 0..3,
+                           src}, j the FFT bin (numpy ifft normalization) */
+    double *khat;       /* [2*6*(2*nKmax+1)] kernel Fourier coefficients,
+                           re/im interleaved: khat[2*(kq*(2*nKmax+1) + j +
+                           nKmax)] with kq in {ln a, 1/a..1/a^5}, j in
+                           [-nKmax, nKmax] */
+} inspectre_fact_nodes;
+
+/* Sample the seven split channels of every output on the NB-point uniform-t
+   grid (the only source-evaluating step; one calc_m_split per node), FFT them,
+   and FFT the six kernels on an NK-point spectrally-resampled dense grid.
+   NK is rounded up so that nMax + KG kernel coefficients exist; defaults that
+   reproduce the validated Python workflow are NB = 4*nMax, NK = 1<<20,
+   KG = 400. Caller frees with inspectre_fact_nodes_free. */
+void inspectre_fact_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
+        struct coordinate *xField, korb_params *orbpar,
+        double a, double p, double e, int NB, int NK, int KG, int nMax,
+        double omegaPhi, double omegaR,
+        inspectre_fact_nodes *out);
+
+void inspectre_fact_nodes_free(inspectre_fact_nodes *s);
+
+/* n-mode amplitudes for mode n by the seven-channel convolution. No source
+   evals. Exact for |n| <= nMax (beyond, missing kernel coefficients are
+   treated as zero). Outputs the complex amplitudes (re/im interleaved like
+   dPhiS); the mixed/second derivatives calc_m leaves NAN are not produced. */
+void inspectre_fact_nodes_integrate(const inspectre_fact_nodes *s, int nMode,
         double *nModePhiS, double *nModeDPhiS, double *nModesrc);
 
 /* FFT source n-mode amplitudes: one FFTW transform of S_m sampled on a uniform

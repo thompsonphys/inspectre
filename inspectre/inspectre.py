@@ -462,6 +462,58 @@ class Inspectre:
             srcSamples[2 * i], srcSamples[2 * i + 1] = src[0], src[1]
         return tSamples, fieldSamples, derivSamples, srcSamples
 
+    def panel_nmodes_fast(self, m, n_list, r_field, theta_field, phi_field=0.0,
+                          order=16, max_levels=40):
+        """All requested n-mode amplitudes from one panel-GL node build.
+
+        Splits the radial period at the analytic closest-approach breakpoints,
+        refines panels geometrically toward them, and applies Gauss-Legendre of
+        `order` points per panel (`max_levels` caps the refinement depth). The
+        node build is the only source-evaluating step; each n then costs a
+        weighted phase sum. Returns a list of (nModePhiS[2], nModeDPhiS[8],
+        nModesrc[2]) tuples, one per entry of n_list.
+        """
+        self._require_c()
+        xF = self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+        n_max = max(abs(int(n)) for n in n_list)
+        s = inspectre_c.panel_nodes_build(
+            self._ctx, m, xF, self._orbpar,
+            self.spin, self.semilatus_rectum, self.eccentricity,
+            self.omega_phi, self.omega_r,
+            order=order, maxLevels=max_levels, nMax=n_max)
+        try:
+            return [inspectre_c.panel_nodes_integrate(
+                        s, m, int(n), self.omega_phi, self.omega_r)
+                    for n in n_list]
+        finally:
+            inspectre_c.panel_nodes_free(s)
+
+    def fact_nmodes_fast(self, m, n_list, r_field, theta_field, phi_field=0.0,
+                         NB=None, NK=1 << 20, KG=400):
+        """All requested n-mode amplitudes from one kernel-factorization build.
+
+        Pure-C port of inspectre.factorization: samples the seven-channel
+        calc_m_split on an NB-point uniform-t grid (defaults to 4*n_max),
+        FFTs channels and the six scalar kernels, then assembles each n by
+        convolution. Returns a list of (nModePhiS[2], nModeDPhiS[8],
+        nModesrc[2]) tuples, one per entry of n_list.
+        """
+        self._require_c()
+        xF = self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+        n_max = max(abs(int(n)) for n in n_list)
+        if NB is None:
+            NB = max(256, 4 * n_max)
+        s = inspectre_c.fact_nodes_build(
+            self._ctx, m, xF, self._orbpar,
+            self.spin, self.semilatus_rectum, self.eccentricity,
+            self.omega_phi, self.omega_r,
+            NB=NB, NK=NK, KG=KG, nMax=n_max)
+        try:
+            return [inspectre_c.fact_nodes_integrate(s, int(n))
+                    for n in n_list]
+        finally:
+            inspectre_c.fact_nodes_free(s)
+
     def fft_source_nmodes_fast(self, m, r_field, theta_field, phi_field=0.0, N=256):
         """C all-n source amplitudes from one FFTW transform.
 

@@ -10,6 +10,7 @@
 
 #include <stdlib.h>
 #include <math.h>
+#include <float.h>
 #include <gsl/gsl_math.h>
 #include <gsl/gsl_errno.h>
 #include <gsl/gsl_roots.h>
@@ -115,7 +116,20 @@ void inspectre_eval_at_lambda(struct effsource_equatorial_ctx *ctx, int mMode,
     xParticle.phi   = phi_p;
 
     effsource_equatorial_ctx_set_particle(ctx, &xParticle, orbpar->E, orbpar->Lz, ur);
-    effsource_equatorial_ctx_calc_m(ctx, mMode, xField, PhiS, dPhiS, ddPhiS, src);
+
+    /* Field-point offsets from the particle. r_p(psi) = p/(1 + e cos psi) is
+       re-evaluated in extended precision so that dr = r_field - r_p keeps its
+       relative accuracy when the particle passes close to the field point;
+       forming it from the double-rounded absolute radii would leave dr with an
+       absolute error ~ulp(r_p), which the near-zone puncture and source
+       amplify catastrophically. Accuracy is then limited only by psi itself. */
+    const long double r_p_l = (long double)p
+        / (1.0L + (long double)e * cosl((long double)psi));
+    const double dr     = (double)((long double)xField->r - r_p_l);
+    const double dtheta = xField->theta - M_PI_2;
+
+    effsource_equatorial_ctx_calc_m_offset(ctx, mMode, dr, dtheta,
+                                           PhiS, dPhiS, ddPhiS, src);
 }
 
 /* residual t(lambda) - t_target for the root solve */
@@ -480,6 +494,292 @@ void inspectre_mino_samples_integrate_rule(const inspectre_mino_samples *s,
     insp_store_results(res, nModePhiS, nModeDPhiS, nModesrc);
 }
 
+/* ---------------------------------------------------------------------------
+ * Panel Gauss-Legendre nodes split at closest approach (INSPECTRE_INTEG_PANEL_GL)
+ * ------------------------------------------------------------------------- */
+
+/* Invert psi(lambda) = psiC by bisection on [0, Vr/2], where psi increases
+   monotonically from 0 to pi over the first half radial period. */
+static double insp_lambda_from_psi(double psiC, korb_params *o)
+{
+    double lo = 0.0, hi = 0.5 * o->Vr;
+    if (psiC <= 0.0)  return lo;
+    if (psiC >= M_PI) return hi;
+    for (int i = 0; i < 120; i++)
+    {
+        double mid = 0.5 * (lo + hi);
+        if (korb_psifromla(mid, *o) < psiC) lo = mid;
+        else                                hi = mid;
+        if (hi - lo <= 4.0 * DBL_EPSILON * o->Vr) break;
+    }
+    return 0.5 * (lo + hi);
+}
+
+static double insp_panel_dist(struct coordinate *xF, korb_params *o, double lam)
+{
+    double r_p = korb_rfrompsi(korb_psifromla(lam, *o), *o);
+    return insp_distance(xF->r, xF->theta, r_p);
+}
+
+/* Lambda-scale of the peak at lamC: the offset at which the field-to-particle
+   distance doubles (whichever side doubles first). Derivative-free, so it is
+   equally valid at a transversal radial crossing (linear approach) and at a
+   turning point (quadratic approach). Returns 0 for an exact crossing
+   (d_min = 0): the caller then refines to the maxLevels floor. */
+static double insp_peak_lambda_scale(struct coordinate *xF, korb_params *o,
+                                     double lamC)
+{
+    const double Vr = o->Vr;
+    double d0 = insp_panel_dist(xF, o, lamC);
+    if (d0 <= 0.0) return 0.0;
+    double dl = 1e-9 * Vr;
+    while (dl < 0.25 * Vr)
+    {
+        double dp = insp_panel_dist(xF, o, lamC + dl);
+        double dm = insp_panel_dist(xF, o, lamC - dl);
+        if (dp >= 2.0 * d0 || dm >= 2.0 * d0) return dl;
+        dl *= 2.0;
+    }
+    return 0.25 * Vr;
+}
+
+/* Closest-approach breakpoints. For r_f inside the libration range the radial
+   phase of closest approach is psi_c = arccos((p/r_f - 1)/e), giving two
+   breakpoints lam1 and Vr - lam1 (outbound/inbound legs); outside the range
+   the clamp lands on the nearest turning point, a single breakpoint. */
+static int insp_panel_find_peaks(struct coordinate *xF, korb_params *o,
+                                 double p, double e,
+                                 double lamB[2], double dlam[2])
+{
+    const double Vr = o->Vr;
+    int nB;
+
+    if (e <= 0.0)   /* circular: no radial peak; single arbitrary anchor */
+    {
+        lamB[0] = 0.0;
+        dlam[0] = 0.25 * Vr;
+        return 1;
+    }
+
+    double cosPsi = (p / xF->r - 1.0) / e;
+    if (cosPsi >= 1.0)        { lamB[0] = 0.0;      nB = 1; }
+    else if (cosPsi <= -1.0)  { lamB[0] = 0.5 * Vr; nB = 1; }
+    else
+    {
+        double lam1 = insp_lambda_from_psi(acos(cosPsi), o);
+        lamB[0] = lam1;
+        lamB[1] = Vr - lam1;
+        nB = (lamB[1] - lamB[0] > 1e-12 * Vr) ? 2 : 1;
+    }
+
+    for (int i = 0; i < nB; i++)
+        dlam[i] = insp_peak_lambda_scale(xF, o, lamB[i]);
+    return nB;
+}
+
+/* Geometric refinement level count toward a peak with lambda-scale dlamPeak,
+   for a segment half-width h: halve until the innermost panel is no wider
+   than the peak scale, capped at maxLevels. */
+static int insp_panel_levels(double h, double dlamPeak, int maxLevels)
+{
+    if (dlamPeak >= h) return 0;
+    if (dlamPeak <= 0.0) return maxLevels;
+    int K = (int)ceil(log2(h / dlamPeak));
+    if (K < 0) K = 0;
+    if (K > maxLevels) K = maxLevels;
+    return K;
+}
+
+void inspectre_panel_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
+        struct coordinate *xField, korb_params *orbpar,
+        double a, double p, double e, int order, int maxLevels, int nMax,
+        double omegaPhi, double omegaR,
+        inspectre_panel_nodes *out)
+{
+    const double Vr = orbpar->Vr;
+    const double Tr = korb_tfromla(Vr, *orbpar);
+    out->Vr = Vr;
+    out->Tr = Tr;
+    out->nNonFinite = 0;
+
+    double lamB[2], dlam[2];
+    int nB = insp_panel_find_peaks(xField, orbpar, p, e, lamB, dlam);
+    out->nBreak = nB;
+    for (int i = 0; i < nB; i++) { out->lamBreak[i] = lamB[i]; out->dlam[i] = dlam[i]; }
+
+    /* segments between consecutive breakpoints, unwrapped from lamB[0] so the
+       full domain [lamB[0], lamB[0]+Vr] is covered with peaks only at segment
+       ends (never interior) */
+    int nSeg = nB;
+    double segA[2], segB[2];
+    double dlamA[2], dlamB_[2];
+    if (nB == 1)
+    {
+        segA[0] = lamB[0];          segB[0] = lamB[0] + Vr;
+        dlamA[0] = dlam[0];         dlamB_[0] = dlam[0];
+    }
+    else
+    {
+        segA[0] = lamB[0];          segB[0] = lamB[1];
+        dlamA[0] = dlam[0];         dlamB_[0] = dlam[1];
+        segA[1] = lamB[1];          segB[1] = lamB[0] + Vr;
+        dlamA[1] = dlam[1];         dlamB_[1] = dlam[0];
+    }
+
+    /* collect geometric panel edges [ga[i], gb[i]] */
+    int maxGeo = nSeg * 2 * (maxLevels + 1);
+    double *ga = malloc((size_t)maxGeo * sizeof(double));
+    double *gb = malloc((size_t)maxGeo * sizeof(double));
+    int nGeo = 0;
+    for (int sgi = 0; sgi < nSeg; sgi++)
+    {
+        double A = segA[sgi], B = segB[sgi];
+        double h = 0.5 * (B - A);
+        int KA = insp_panel_levels(h, dlamA[sgi],  maxLevels);
+        int KB = insp_panel_levels(h, dlamB_[sgi], maxLevels);
+
+        /* toward A: sliver first, then geometrically growing panels to mid */
+        ga[nGeo] = A;  gb[nGeo] = A + h * pow(2.0, -KA);  nGeo++;
+        for (int k = KA; k >= 1; k--)
+        {
+            ga[nGeo] = A + h * pow(2.0, -k);
+            gb[nGeo] = A + h * pow(2.0, -(k - 1));
+            nGeo++;
+        }
+        /* toward B: mirror image */
+        for (int k = 1; k <= KB; k++)
+        {
+            ga[nGeo] = B - h * pow(2.0, -(k - 1));
+            gb[nGeo] = B - h * pow(2.0, -k);
+            nGeo++;
+        }
+        ga[nGeo] = B - h * pow(2.0, -KB);  gb[nGeo] = B;  nGeo++;
+    }
+
+    /* Oscillation resolution: a q-point Gauss-Legendre rule only integrates
+       exp(i w t) accurately while w*dt_panel <~ q, so subdivide each panel
+       uniformly until the highest requested frequency w_max = |m| wphi +
+       nMax*wr satisfies that bound. This is what caps the usable |n| of the
+       node set; the geometric stack above only handles the peak. */
+    double omegaMax = fabs((double)mMode) * fabs(omegaPhi)
+                    + (double)(nMax > 0 ? nMax : 0) * fabs(omegaR);
+    int nPan = 0;
+    int *sub = malloc((size_t)nGeo * sizeof(int));
+    for (int i = 0; i < nGeo; i++)
+    {
+        double Jmid = insp_dtdlambda(fmod(0.5 * (ga[i] + gb[i]), Vr), orbpar);
+        double dt = (gb[i] - ga[i]) * Jmid;
+        int ns = (omegaMax > 0.0) ? (int)ceil(omegaMax * dt / (double)order) : 1;
+        if (ns < 1) ns = 1;
+        sub[i] = ns;
+        nPan += ns;
+    }
+    double *pa = malloc((size_t)nPan * sizeof(double));
+    double *pb = malloc((size_t)nPan * sizeof(double));
+    for (int i = 0, j = 0; i < nGeo; i++)
+    {
+        double w = (gb[i] - ga[i]) / (double)sub[i];
+        for (int k = 0; k < sub[i]; k++, j++)
+        {
+            pa[j] = ga[i] + (double)k * w;
+            pb[j] = (k == sub[i] - 1) ? gb[i] : ga[i] + (double)(k + 1) * w;
+        }
+    }
+    free(ga); free(gb); free(sub);
+
+    /* Gauss-Legendre nodes per panel + source samples */
+    gsl_integration_glfixed_table *tbl =
+        gsl_integration_glfixed_table_alloc((size_t)order);
+
+    const int N = nPan * order;
+    out->n   = N;
+    out->lam = malloc((size_t)N * sizeof(double));
+    out->t   = malloc((size_t)N * sizeof(double));
+    out->J   = malloc((size_t)N * sizeof(double));
+    out->w   = malloc((size_t)N * sizeof(double));
+    out->raw = malloc((size_t)12 * N * sizeof(double));
+
+    int idx = 0;
+    for (int pi = 0; pi < nPan; pi++)
+    {
+        for (int j = 0; j < order; j++, idx++)
+        {
+            double lamj, wj;
+            gsl_integration_glfixed_point(pa[pi], pb[pi], (size_t)j,
+                                          &lamj, &wj, tbl);
+            /* Nodes past the wrap are folded to the principal period for
+               EVERYTHING -- source AND carrier time. The full n-mode
+               integrand exp(i w_mn t) S_m(t) is exactly Tr-periodic (the
+               m-carrier cancels the secular phase of S_m), but S_m alone is
+               not: continuing t by Tr while sampling S_m at the principal
+               lambda would tag wrapped nodes with a spurious
+               exp(i m wphi Tr) factor. */
+            double lamEval = lamj >= Vr ? lamj - Vr : lamj;
+
+            out->lam[idx] = lamj;
+            out->w[idx]   = wj;
+            out->t[idx]   = korb_tfromla(lamEval, *orbpar);
+            out->J[idx]   = insp_dtdlambda(lamEval, orbpar);
+
+            double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
+            inspectre_eval_at_lambda(ctx, mMode, xField, lamEval, orbpar,
+                                     a, p, e, PhiS, dPhiS, ddPhiS, src);
+            out->raw[0 * N + idx] = PhiS[0];
+            out->raw[1 * N + idx] = PhiS[1];
+            for (int c = 0; c < 8; c++)
+                out->raw[(2 + c) * N + idx] = dPhiS[c];
+            out->raw[10 * N + idx] = src[0];
+            out->raw[11 * N + idx] = src[1];
+            /* Innermost-sliver nodes at an exact crossing can land deep in the
+               source's near zone (distance <~ 1e-8), where its intrinsic input
+               cancellation can produce non-finite values. Their quadrature
+               weight is ~2^-maxLevels of the period, so zeroing them changes
+               the integral at only that level -- but a single NaN would poison
+               the whole sum. Count them so callers can tell. */
+            for (int c = 0; c < 12; c++)
+                if (!isfinite(out->raw[c * N + idx]))
+                {
+                    out->raw[c * N + idx] = 0.0;
+                    out->nNonFinite++;
+                }
+        }
+    }
+
+    gsl_integration_glfixed_table_free(tbl);
+    free(pa); free(pb);
+}
+
+void inspectre_panel_nodes_free(inspectre_panel_nodes *s)
+{
+    free(s->lam); free(s->t); free(s->J); free(s->w); free(s->raw);
+    s->lam = s->t = s->J = s->w = s->raw = NULL;
+    s->n = 0;
+}
+
+void inspectre_panel_nodes_integrate(const inspectre_panel_nodes *s,
+        int mMode, int nMode, double omegaPhi, double omegaR,
+        double *nModePhiS, double *nModeDPhiS, double *nModesrc)
+{
+    const int N = s->n;
+    double res[12] = { 0.0 };
+    for (int k = 0; k < N; k++)
+    {
+        double Field[2] = { s->raw[0 * N + k], s->raw[1 * N + k] };
+        double Deriv[8];
+        for (int c = 0; c < 8; c++) Deriv[c] = s->raw[(2 + c) * N + k];
+        double Src[2] = { s->raw[10 * N + k], s->raw[11 * N + k] };
+
+        double nField[2], nDeriv[8], nSrc[2];
+        generateNModeIntegrands(s->t[k], omegaPhi, omegaR, mMode, nMode,
+                                Field, Deriv, Src, nField, nDeriv, nSrc);
+        double W = s->w[k] * s->J[k];
+        for (int c = 0; c < 12; c++)
+            res[c] += W * insp_select_component(c, nField, nDeriv, nSrc);
+    }
+    for (int c = 0; c < 12; c++) res[c] /= s->Tr;
+    insp_store_results(res, nModePhiS, nModeDPhiS, nModesrc);
+}
+
 void inspectre_integrate_nmode(int mode,
         struct effsource_equatorial_ctx *ctx, int mMode, int nMode,
         struct coordinate *xField, korb_params *orbpar,
@@ -584,6 +884,37 @@ void inspectre_integrate_nmode(int mode,
         inspectre_mino_samples_integrate(&s, mMode, nMode, omegaPhi, omegaR,
                                          nModePhiS, nModeDPhiS, nModesrc);
         inspectre_mino_samples_free(&s);
+        return;
+    }
+    else if (mode == INSPECTRE_INTEG_PANEL_GL)
+    {
+        /* Self-contained: split [0, Vr] at the analytic closest-approach
+           breakpoints, refine panels geometrically toward them, Gauss-Legendre
+           per panel. Default order/levels; callers sweeping many n should use
+           inspectre_panel_nodes_build + _integrate directly. */
+        inspectre_panel_nodes s;
+        int nMax = abs(nMode) > 8 ? abs(nMode) : 8;
+        inspectre_panel_nodes_build(ctx, mMode, xField, orbpar, a, p, e,
+                                    16, 40, nMax, omegaPhi, omegaR, &s);
+        inspectre_panel_nodes_integrate(&s, mMode, nMode, omegaPhi, omegaR,
+                                        nModePhiS, nModeDPhiS, nModesrc);
+        inspectre_panel_nodes_free(&s);
+        return;
+    }
+    else if (mode == INSPECTRE_INTEG_FACT_CONV)
+    {
+        /* Self-contained: seven-channel kernel factorization + convolution
+           with the validated defaults (NB = 4 nMax, NK = 1<<20, KG = 400).
+           The build is far heavier than one panel build; callers sweeping
+           many n should use inspectre_fact_nodes_build + _integrate. */
+        inspectre_fact_nodes s;
+        int nMax = abs(nMode) > 64 ? abs(nMode) : 64;
+        int NB = 4 * nMax;
+        inspectre_fact_nodes_build(ctx, mMode, xField, orbpar, a, p, e,
+                                   NB, 1 << 20, 400, nMax, omegaPhi, omegaR, &s);
+        inspectre_fact_nodes_integrate(&s, nMode,
+                                       nModePhiS, nModeDPhiS, nModesrc);
+        inspectre_fact_nodes_free(&s);
         return;
     }
     else /* sample-based methods integrate the precomputed samples */
@@ -696,4 +1027,258 @@ void inspectre_fft_source_nmodes(struct effsource_equatorial_ctx *ctx, int mMode
     gsl_interp_accel_free(acc);
     free(latT);
     free(latL);
+}
+
+/* ===========================================================================
+ * (4) Kernel-factorization n-modes -- C port of inspectre/factorization.py
+ *
+ * The build samples the seven-channel calc_m_split on a uniform-t base grid
+ * (fold applied so each channel series is Tr-periodic), FFTs the channels,
+ * spectrally resamples the orbit series (r_p, alpha20, alpha02) to a dense
+ * grid, and FFTs the six scalar kernels {ln a, 1/a, ..., 1/a^5}. Integration
+ * per n is the convolution X_n = A^(n) + sum_ch sum_k ch^(k) K_ch^(n-k).
+ * Conventions match numpy: X^(n) = (1/N) sum_j X_j exp(+2 pi i n j / N),
+ * i.e. an FFTW_BACKWARD transform scaled by 1/N.
+ * ========================================================================= */
+
+/* channel-major complex component (ch, c) at base-grid node j:
+   c = 0 -> PhiS, 1..4 -> dPhiS pairs, 5 -> src */
+#define INSP_FACT_NCH   7
+#define INSP_FACT_NCOMP 6
+#define INSP_FACT_NKQ   6      /* kernels: ln a, 1/a .. 1/a^5 */
+
+static int insp_fact_wrap(int j, int N) { return ((j % N) + N) % N; }
+
+/* Spectral (zero-pad) resample of the real NB-periodic series x to NK points,
+   matching factorization._resample_real: forward FFT, keep the lowest NB/2
+   positive and NB/2 negative bins, backward FFT on the dense grid. planB_NK
+   transforms inNK -> outNK (FFTW_BACKWARD, length NK); the result lands in
+   xd (real part, numpy normalization). */
+static void insp_fact_resample(const double *x, int NB, int NK,
+        fftw_plan planF_NB, fftw_complex *inNB, fftw_complex *outNB,
+        fftw_plan planB_NK, fftw_complex *inNK, fftw_complex *outNK,
+        double *xd)
+{
+    const int h = NB / 2;
+    for (int j = 0; j < NB; j++) { inNB[j][0] = x[j]; inNB[j][1] = 0.0; }
+    fftw_execute(planF_NB);
+    for (int k = 0; k < NK; k++) { inNK[k][0] = 0.0; inNK[k][1] = 0.0; }
+    for (int k = 0; k < h; k++)
+    {
+        inNK[k][0] = outNB[k][0];               inNK[k][1] = outNB[k][1];
+        inNK[NK - h + k][0] = outNB[h + k][0];  inNK[NK - h + k][1] = outNB[h + k][1];
+    }
+    fftw_execute(planB_NK);
+    for (int k = 0; k < NK; k++) xd[k] = outNK[k][0] / (double)NB;
+}
+
+void inspectre_fact_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
+        struct coordinate *xField, korb_params *orbpar,
+        double a, double p, double e, int NB, int NK, int KG, int nMax,
+        double omegaPhi, double omegaR,
+        inspectre_fact_nodes *out)
+{
+    (void)omegaR;   /* carried for signature symmetry with the panel build */
+
+    if (NB < 4) NB = 4;
+    if (NB % 2) NB++;                    /* resample needs NB even */
+    if (KG < 0) KG = 0;
+    if (KG > NB / 2) KG = NB / 2;        /* beyond NB/2 the base-grid FFT bins
+                                            wrap and k would double-count */
+    if (nMax < 0) nMax = 0;
+    const int nKmax = nMax + KG;
+    if (NK < 2) NK = 2;
+    while (NK < 2 * nKmax + 2 || NK < 2 * NB) NK *= 2;
+
+    const double Vr = orbpar->Vr;
+    const double Tr = korb_tfromla(Vr, *orbpar);
+    out->NB = NB; out->NK = NK; out->KG = KG;
+    out->nMax = nMax; out->nKmax = nKmax;
+    out->nNonFinite = 0;
+    out->Tr = Tr; out->Vr = Vr;
+    out->chat = malloc((size_t)2 * INSP_FACT_NCH * INSP_FACT_NCOMP * NB
+                       * sizeof(double));
+    out->khat = malloc((size_t)2 * INSP_FACT_NKQ * (2 * (size_t)nKmax + 1)
+                       * sizeof(double));
+
+    /* ---- sample the split channels + orbit series on the base grid ---- */
+    double *g   = malloc((size_t)2 * INSP_FACT_NCH * INSP_FACT_NCOMP * NB
+                         * sizeof(double));
+    double *rP  = malloc((size_t)NB * sizeof(double));
+    double *a20 = malloc((size_t)NB * sizeof(double));
+    double *a02 = malloc((size_t)NB * sizeof(double));
+    const double dth = xField->theta - M_PI_2;
+
+    for (int j = 0; j < NB; j++)
+    {
+        double t   = (double)j * Tr / (double)NB;
+        double lam = inspectre_lambda_from_t(t, orbpar);
+        double psi = korb_psifromla(lam, *orbpar);
+        double r_p = korb_rfrompsi(psi, *orbpar);
+        double phi_p = korb_phifromla(lam, *orbpar);
+        double ur  = fourVel(psi, a, p, e, orbpar->E);
+
+        struct coordinate xParticle;
+        xParticle.t = 0.0; xParticle.r = r_p;
+        xParticle.theta = M_PI_2; xParticle.phi = phi_p;
+        effsource_equatorial_ctx_set_particle(ctx, &xParticle,
+                                              orbpar->E, orbpar->Lz, ur);
+
+        double PhiS_s[14], dPhiS_s[56], d2PhiS_s[140], src_s[14], al[4];
+        effsource_equatorial_ctx_calc_m_split(ctx, mMode, xField->r - r_p, dth,
+                                              PhiS_s, dPhiS_s, d2PhiS_s, src_s);
+        effsource_equatorial_ctx_get_alpha(ctx, al);
+        rP[j] = r_p; a20[j] = al[0]; a02[j] = al[1];
+
+        /* fold exp(i m wphi t): cancels the secular phase so every channel
+           series is Tr-periodic (same role as the m-carrier in the panel /
+           FFT paths) */
+        double fr = cos((double)mMode * omegaPhi * t);
+        double fi = sin((double)mMode * omegaPhi * t);
+        for (int ch = 0; ch < INSP_FACT_NCH; ch++)
+            for (int c = 0; c < INSP_FACT_NCOMP; c++)
+            {
+                double re, im;
+                if (c == 0)      { re = PhiS_s[ch * 2];  im = PhiS_s[ch * 2 + 1]; }
+                else if (c < 5)  { re = dPhiS_s[ch * 8 + 2 * (c - 1)];
+                                   im = dPhiS_s[ch * 8 + 2 * (c - 1) + 1]; }
+                else             { re = src_s[ch * 2];   im = src_s[ch * 2 + 1]; }
+                if (!isfinite(re) || !isfinite(im))
+                {
+                    re = 0.0; im = 0.0;
+                    out->nNonFinite++;
+                }
+                size_t o = 2 * ((size_t)(ch * INSP_FACT_NCOMP + c) * NB + j);
+                g[o]     = fr * re - fi * im;
+                g[o + 1] = fr * im + fi * re;
+            }
+    }
+
+    /* ---- channel FFTs (backward / NB = numpy ifft) ---- */
+    fftw_complex *inNB  = fftw_malloc(sizeof(fftw_complex) * (size_t)NB);
+    fftw_complex *outNB = fftw_malloc(sizeof(fftw_complex) * (size_t)NB);
+    fftw_plan planB_NB = fftw_plan_dft_1d(NB, inNB, outNB,
+                                          FFTW_BACKWARD, FFTW_ESTIMATE);
+    fftw_plan planF_NB = fftw_plan_dft_1d(NB, inNB, outNB,
+                                          FFTW_FORWARD, FFTW_ESTIMATE);
+    for (int s = 0; s < INSP_FACT_NCH * INSP_FACT_NCOMP; s++)
+    {
+        for (int j = 0; j < NB; j++)
+        {
+            inNB[j][0] = g[2 * ((size_t)s * NB + j)];
+            inNB[j][1] = g[2 * ((size_t)s * NB + j) + 1];
+        }
+        fftw_execute(planB_NB);
+        for (int j = 0; j < NB; j++)
+        {
+            out->chat[2 * ((size_t)s * NB + j)]     = outNB[j][0] / (double)NB;
+            out->chat[2 * ((size_t)s * NB + j) + 1] = outNB[j][1] / (double)NB;
+        }
+    }
+    free(g);
+
+    /* ---- dense kernel grid: spectral resample of the orbit series ---- */
+    fftw_complex *inNK  = fftw_malloc(sizeof(fftw_complex) * (size_t)NK);
+    fftw_complex *outNK = fftw_malloc(sizeof(fftw_complex) * (size_t)NK);
+    fftw_plan planB_NK = fftw_plan_dft_1d(NK, inNK, outNK,
+                                          FFTW_BACKWARD, FFTW_ESTIMATE);
+
+    double *alphaD = malloc((size_t)NK * sizeof(double));
+    double *tmpD   = malloc((size_t)NK * sizeof(double));
+    /* alpha_d = a20_d (r_f - r_p_d)^2 + a02_d dth^2, accumulated so only two
+       dense scratch arrays are alive at once */
+    insp_fact_resample(rP, NB, NK, planF_NB, inNB, outNB,
+                       planB_NK, inNK, outNK, tmpD);
+    for (int k = 0; k < NK; k++)
+    {
+        double dr = xField->r - tmpD[k];
+        alphaD[k] = dr * dr;
+    }
+    insp_fact_resample(a20, NB, NK, planF_NB, inNB, outNB,
+                       planB_NK, inNK, outNK, tmpD);
+    for (int k = 0; k < NK; k++) alphaD[k] *= tmpD[k];
+    insp_fact_resample(a02, NB, NK, planF_NB, inNB, outNB,
+                       planB_NK, inNK, outNK, tmpD);
+    for (int k = 0; k < NK; k++) alphaD[k] += tmpD[k] * dth * dth;
+    free(rP); free(a20); free(a02);
+
+    /* ---- kernel FFTs, trimmed to |j| <= nKmax ---- */
+    double *invD = tmpD;                          /* reuse as 1/alpha scratch */
+    for (int k = 0; k < NK; k++) invD[k] = 1.0 / alphaD[k];
+    const size_t kW = 2 * (size_t)nKmax + 1;
+    for (int kq = 0; kq < INSP_FACT_NKQ; kq++)
+    {
+        for (int k = 0; k < NK; k++)
+        {
+            double v = (kq == 0) ? log(alphaD[k]) : alphaD[k];
+            if (!isfinite(v)) { v = 0.0; out->nNonFinite++; }
+            inNK[k][0] = v; inNK[k][1] = 0.0;
+        }
+        fftw_execute(planB_NK);
+        for (int j = -nKmax; j <= nKmax; j++)
+        {
+            int bin = insp_fact_wrap(j, NK);
+            out->khat[2 * ((size_t)kq * kW + (size_t)(j + nKmax))]
+                = outNK[bin][0] / (double)NK;
+            out->khat[2 * ((size_t)kq * kW + (size_t)(j + nKmax)) + 1]
+                = outNK[bin][1] / (double)NK;
+        }
+        /* next power: alpha^-1 after the log pass, then alpha^-(q+1) */
+        if (kq < INSP_FACT_NKQ - 1)
+            for (int k = 0; k < NK; k++)
+                alphaD[k] = (kq == 0) ? invD[k] : alphaD[k] * invD[k];
+    }
+
+    free(alphaD); free(tmpD);
+    fftw_destroy_plan(planB_NB); fftw_destroy_plan(planF_NB);
+    fftw_destroy_plan(planB_NK);
+    fftw_free(inNB); fftw_free(outNB);
+    fftw_free(inNK); fftw_free(outNK);
+}
+
+void inspectre_fact_nodes_free(inspectre_fact_nodes *s)
+{
+    free(s->chat); free(s->khat);
+    s->chat = s->khat = NULL;
+    s->NB = 0;
+}
+
+void inspectre_fact_nodes_integrate(const inspectre_fact_nodes *s, int nMode,
+        double *nModePhiS, double *nModeDPhiS, double *nModesrc)
+{
+    const int NB = s->NB, KG = s->KG, nKmax = s->nKmax;
+    const size_t kW = 2 * (size_t)nKmax + 1;
+    double res[12] = { 0.0 };
+
+    for (int c = 0; c < INSP_FACT_NCOMP; c++)
+    {
+        /* A channel: direct read of the base-grid FFT bin */
+        size_t oA = 2 * ((size_t)(0 * INSP_FACT_NCOMP + c) * NB
+                         + insp_fact_wrap(nMode, NB));
+        double xr = s->chat[oA], xi = s->chat[oA + 1];
+
+        /* L, P1..P5: convolution against the trimmed kernel coefficients */
+        for (int ch = 1; ch < INSP_FACT_NCH; ch++)
+        {
+            const int kq = ch - 1;
+            for (int k = -KG; k <= KG; k++)
+            {
+                int j = nMode - k;
+                if (j < -nKmax || j > nKmax) continue;
+                size_t oc = 2 * ((size_t)(ch * INSP_FACT_NCOMP + c) * NB
+                                 + insp_fact_wrap(k, NB));
+                size_t ok = 2 * ((size_t)kq * kW + (size_t)(j + nKmax));
+                double cr = s->chat[oc],     ci = s->chat[oc + 1];
+                double kr = s->khat[ok],     ki = s->khat[ok + 1];
+                xr += cr * kr - ci * ki;
+                xi += cr * ki + ci * kr;
+            }
+        }
+
+        if (c == 0)      { res[0] = xr;              res[1] = xi; }
+        else if (c < 5)  { res[2 * c] = xr;          res[2 * c + 1] = xi; }
+        else             { res[10] = xr;             res[11] = xi; }
+    }
+
+    insp_store_results(res, nModePhiS, nModeDPhiS, nModesrc);
 }

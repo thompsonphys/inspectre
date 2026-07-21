@@ -152,4 +152,65 @@ def mino_samples_integrate(s, mMode, nMode, omegaPhi, omegaR):
 
 def mino_samples_free(s):
     inspectre_mino_samples_free(s)
+
+
+def panel_nodes_build(ctx, mMode, xField, orbpar, a, p, e, omegaPhi, omegaR,
+                      order=16, maxLevels=40, nMax=64):
+    """Build panel-GL nodes split at the closest-approach breakpoints.
+
+    nMax is the largest |n| the node set must resolve. Returns an
+    inspectre_panel_nodes handle; free it with panel_nodes_free.
+    """
+    s = inspectre_panel_nodes()
+    inspectre_panel_nodes_build(ctx, mMode, xField, orbpar, a, p, e,
+                                order, maxLevels, nMax, omegaPhi, omegaR, s)
+    return s
+
+
+def panel_nodes_integrate(s, mMode, nMode, omegaPhi, omegaR):
+    """Frequency-shift prebuilt panel samples for mode n and sum the quadrature.
+
+    Returns (nModePhiS[2], nModeDPhiS[8], nModesrc[2]) as Python lists.
+    """
+    nPhiS = doubleArray(2); nDPhiS = doubleArray(8); nsrc = doubleArray(2)
+    inspectre_panel_nodes_integrate(s, mMode, nMode, omegaPhi, omegaR,
+                                    nPhiS.cast(), nDPhiS.cast(), nsrc.cast())
+    return ([nPhiS[0], nPhiS[1]],
+            [nDPhiS[i] for i in range(8)],
+            [nsrc[0], nsrc[1]])
+
+
+def panel_nodes_free(s):
+    inspectre_panel_nodes_free(s)
+
+
+def fact_nodes_build(ctx, mMode, xField, orbpar, a, p, e, omegaPhi, omegaR,
+                     NB=4096, NK=1 << 20, KG=400, nMax=512):
+    """Build the kernel-factorization channel/kernel FFT coefficients.
+
+    NB channel-split source evaluations (the only source-evaluating step);
+    kernels resolve |n| <= nMax. Returns an inspectre_fact_nodes handle; free
+    it with fact_nodes_free.
+    """
+    s = inspectre_fact_nodes()
+    inspectre_fact_nodes_build(ctx, mMode, xField, orbpar, a, p, e,
+                               NB, NK, KG, nMax, omegaPhi, omegaR, s)
+    return s
+
+
+def fact_nodes_integrate(s, nMode):
+    """n-mode amplitudes for mode n by the seven-channel convolution.
+
+    Returns (nModePhiS[2], nModeDPhiS[8], nModesrc[2]) as Python lists.
+    """
+    nPhiS = doubleArray(2); nDPhiS = doubleArray(8); nsrc = doubleArray(2)
+    inspectre_fact_nodes_integrate(s, nMode,
+                                   nPhiS.cast(), nDPhiS.cast(), nsrc.cast())
+    return ([nPhiS[0], nPhiS[1]],
+            [nDPhiS[i] for i in range(8)],
+            [nsrc[0], nsrc[1]])
+
+
+def fact_nodes_free(s):
+    inspectre_fact_nodes_free(s)
 %}

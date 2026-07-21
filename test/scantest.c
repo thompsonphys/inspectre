@@ -308,6 +308,41 @@ int main(int argc, char *argv[])
                         src_qm[0], src_qm[1], er, ei, fmax(er, ei), 0.0, t_qm);
             }
 
+            /* ---- 2c. panel Gauss-Legendre (self-contained, N-independent:
+               node count set by the breakpoint geometry, order 16, 40 levels,
+               resolved up to |nMode|). Reported N is the node count. ---- */
+            if (strstr(cfg.methods, "panelgl"))
+            {
+                inspectre_panel_nodes ps;
+                double src_pg[2] = { 0.0, 0.0 };
+                double build_s = 1e300, integ_s = 1e300;
+                int nNodes = 0, nBad = 0;
+                for (int rep = 0; rep < repeats; rep++) {
+                    double t0 = now_sec();
+                    inspectre_panel_nodes_build(ctx, mMode, &xField, &orbpar,
+                            a, p, e, 16, 40, abs(nMode) > 8 ? abs(nMode) : 8,
+                            omegaPhi, omegaR, &ps);
+                    double dt = now_sec() - t0;
+                    if (dt < build_s) build_s = dt;
+                    nNodes = ps.n;
+                    nBad   = ps.nNonFinite;
+                    t0 = now_sec();
+                    inspectre_panel_nodes_integrate(&ps, mMode, nMode,
+                            omegaPhi, omegaR, PhiS, dPhiS, src_pg);
+                    dt = now_sec() - t0;
+                    if (dt < integ_s) integ_s = dt;
+                    inspectre_panel_nodes_free(&ps);
+                }
+                if (nBad)
+                    fprintf(stderr, "scantest: panelgl r=%g theta=%g zeroed %d "
+                            "non-finite deep-node samples\n", rField, theta, nBad);
+                double er = fabs(src_pg[0] - src_ref[0]);
+                double ei = fabs(src_pg[1] - src_ref[1]);
+                fprintf(out, "%.10g,%.10g,%d,%s,% .12e,% .12e,%.3e,%.3e,%.3e,%.3e,%.6e\n",
+                        rField, theta, nNodes, "panelgl",
+                        src_pg[0], src_pg[1], er, ei, fmax(er, ei), build_s, integ_s);
+            }
+
             /* ---- 3. fixed-grid sweep ---- */
             for (int k = 0; k < cfg.nN; k++)
             {
@@ -373,6 +408,9 @@ int main(int argc, char *argv[])
                                 fftRe[bin], fftIm[bin], er, ei, fmax(er, ei), 0.0, integ_s);
                         continue;
                     }
+
+                    /* panelgl is N-independent and reported once above */
+                    if (!strcmp(tok, "panelgl")) continue;
 
                     int mode = method_mode(tok);
                     /* qag-family are N-independent and reported once above */
