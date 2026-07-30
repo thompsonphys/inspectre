@@ -55,8 +55,9 @@ double fourVel(double psi, double a, double p, double e, double E)
 {
     double X = xFuncInsp(a, p, e);
     double X2 = X * X;
+    double R2 = X2 + a * a + 2.0 * X * a * E - 2.0 * X2 / p * (3 + e * cos(psi));
 
-    return e * sin(psi) / p * (X2 + a * a + 2.0 * X * a * E - 2.0 * X2 / p * (3 + e * cos(psi)));
+    return e * sin(psi) / p * sqrt(R2 > 0.0 ? R2 : 0.0);
 }
 
 /* Assuming exp(i Omega t) rotation */
