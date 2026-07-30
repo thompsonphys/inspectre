@@ -15,6 +15,14 @@ double xFuncInsp(double a, double p, double e);
 /* Radial four-velocity u^r from the radial phase psi. */
 double fourVel(double psi, double a, double p, double e, double E);
 
+/* Circular limit: korb leaves Vr / Yr unset and wr = 0 for e == 0, so supply
+   the epicyclic frequency instead. _circular_fix patches wr / Yr / Vr in place
+   after korb_getparams; no-op when eccentric. */
+double inspectre_epicyclic_frequency(const korb_params *orbpar);
+double inspectre_radial_frequency(const korb_params *orbpar);
+double inspectre_radial_mino_period(const korb_params *orbpar);
+int    inspectre_orbit_circular_fix(korb_params *orbpar);
+
 /* Frequency shift exp(i Omega t) applied to a complex (re, im) pair, where
    Omega = mMode*omegaPhi + nMode*omegaR. */
 double frequencyShiftReal(double t, double omegaPhi, double omegaR,
@@ -99,7 +107,11 @@ enum { INSPECTRE_INTEG_QAG        = 0,
    and ignore tSamples/field/deriv/srcSamples (pass NULL). QAG_MINO is adaptive;
    MINO_SPLINE places `nSamples` nodes graded toward closest approach and applies
    the gsl spline quadrature. Outputs the complex n-mode amplitudes (re/im
-   interleaved like dPhiS). */
+   interleaved like dPhiS).
+
+   Both QAG modes raise `epsabs` per component to the roundoff level the
+   integrand carries; a component whose exact integral vanishes cannot be
+   certified below that, and asking for less makes QAG bisect to its limit. */
 void inspectre_integrate_nmode(int mode,
         struct effsource_equatorial_ctx *ctx, int mMode, int nMode,
         struct coordinate *xField, korb_params *orbpar,

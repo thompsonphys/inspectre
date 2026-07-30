@@ -60,6 +60,38 @@ double fourVel(double psi, double a, double p, double e, double E)
     return e * sin(psi) / p * sqrt(R2 > 0.0 ? R2 : 0.0);
 }
 
+double inspectre_epicyclic_frequency(const korb_params *orbpar)
+{
+    const double a = orbpar->a, p = orbpar->p;
+    double R = 1.0 - 6.0 / p + 8.0 * a / (p * sqrt(p)) - 3.0 * a * a / (p * p);
+
+    return orbpar->wphi * sqrt(R > 0.0 ? R : 0.0);
+}
+
+double inspectre_radial_frequency(const korb_params *orbpar)
+{
+    return orbpar->eccentric ? orbpar->wr : inspectre_epicyclic_frequency(orbpar);
+}
+
+double inspectre_radial_mino_period(const korb_params *orbpar)
+{
+    if (orbpar->eccentric)
+        return orbpar->Vr;
+
+    return 2.0 * M_PI / (orbpar->Ga * inspectre_epicyclic_frequency(orbpar));
+}
+
+int inspectre_orbit_circular_fix(korb_params *orbpar)
+{
+    if (orbpar->eccentric)
+        return 0;
+
+    orbpar->wr = inspectre_epicyclic_frequency(orbpar);
+    orbpar->Yr = orbpar->Ga * orbpar->wr;
+    orbpar->Vr = 2.0 * M_PI / orbpar->Yr;
+    return 1;
+}
+
 /* Assuming exp(i Omega t) rotation */
 double frequencyShiftReal(double t, double omegaPhi, double omegaR, double fieldRE, double fieldIM, int mMode, int nMode)
 {
@@ -220,10 +252,12 @@ static double insp_select_component(int c, double *nField, double *nDeriv, doubl
     return nSrc[c - 10];
 }
 
-double inspectre_nmode_integrand(double t, void *params)
+/* All twelve frequency-shifted components at coordinate time t. One source
+   evaluation serves all of them; the gsl_function below picks one, the epsabs
+   floor needs the whole set. */
+static void insp_nmode_components_time(double t, inspectre_nmode_params *ip,
+                                       double *out)
 {
-    inspectre_nmode_params *ip = (inspectre_nmode_params *)params;
-
     double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
     inspectre_eval_at_time(ip->ctx, ip->mMode, ip->xField, t, ip->orbpar,
                            ip->a, ip->p, ip->e, PhiS, dPhiS, ddPhiS, src);
@@ -232,7 +266,17 @@ double inspectre_nmode_integrand(double t, void *params)
     generateNModeIntegrands(t, ip->omegaPhi, ip->omegaR, ip->mMode, ip->nMode,
                             PhiS, dPhiS, src, nField, nDeriv, nSrc);
 
-    return insp_select_component(ip->component, nField, nDeriv, nSrc);
+    for (int c = 0; c < 12; c++)
+        out[c] = insp_select_component(c, nField, nDeriv, nSrc);
+}
+
+double inspectre_nmode_integrand(double t, void *params)
+{
+    inspectre_nmode_params *ip = (inspectre_nmode_params *)params;
+
+    double f[12];
+    insp_nmode_components_time(t, ip, f);
+    return f[ip->component];
 }
 
 /* Instantaneous time Jacobian dt/dlambda at Mino time lambda. The coordinate
@@ -257,14 +301,12 @@ static double insp_distance(double rField, double theta, double rParticle)
     return sqrt(s > 0.0 ? s : 0.0);
 }
 
-/* gsl_function: as inspectre_nmode_integrand but parameterized by Mino time
-   lambda. Evaluates at lambda directly (no Brent inversion), frequency-shifts
-   with t(lambda), and weights by the Jacobian dt/dlambda so that integrating
-   over [0, Vr] reproduces the coordinate-time integral over [0, Tr]. */
-double inspectre_nmode_integrand_lambda(double lambda, void *params)
+/* As insp_nmode_components_time but at Mino time lambda, weighted by the
+   Jacobian dt/dlambda so that integrating over [0, Vr] reproduces the
+   coordinate-time integral over [0, Tr]. No Brent inversion. */
+static void insp_nmode_components_lambda(double lambda, inspectre_nmode_params *ip,
+                                         double *out)
 {
-    inspectre_nmode_params *ip = (inspectre_nmode_params *)params;
-
     double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
     inspectre_eval_at_lambda(ip->ctx, ip->mMode, ip->xField, lambda, ip->orbpar,
                              ip->a, ip->p, ip->e, PhiS, dPhiS, ddPhiS, src);
@@ -276,7 +318,18 @@ double inspectre_nmode_integrand_lambda(double lambda, void *params)
     generateNModeIntegrands(t, ip->omegaPhi, ip->omegaR, ip->mMode, ip->nMode,
                             PhiS, dPhiS, src, nField, nDeriv, nSrc);
 
-    return insp_select_component(ip->component, nField, nDeriv, nSrc) * J;
+    for (int c = 0; c < 12; c++)
+        out[c] = insp_select_component(c, nField, nDeriv, nSrc) * J;
+}
+
+/* gsl_function: as inspectre_nmode_integrand but parameterized by Mino time. */
+double inspectre_nmode_integrand_lambda(double lambda, void *params)
+{
+    inspectre_nmode_params *ip = (inspectre_nmode_params *)params;
+
+    double f[12];
+    insp_nmode_components_lambda(lambda, ip, f);
+    return f[ip->component];
 }
 
 /* store the 12 scalar results into the interleaved output arrays */
@@ -369,7 +422,7 @@ void inspectre_mino_samples_build(struct effsource_equatorial_ctx *ctx, int mMod
         inspectre_mino_samples *out)
 {
     const int N = nSamples;
-    const double Vr = orbpar->Vr;
+    const double Vr = inspectre_radial_mino_period(orbpar);
 
     out->n  = N;
     out->Vr = Vr;
@@ -503,7 +556,8 @@ void inspectre_mino_samples_integrate_rule(const inspectre_mino_samples *s,
    monotonically from 0 to pi over the first half radial period. */
 static double insp_lambda_from_psi(double psiC, korb_params *o)
 {
-    double lo = 0.0, hi = 0.5 * o->Vr;
+    const double Vr = inspectre_radial_mino_period(o);
+    double lo = 0.0, hi = 0.5 * Vr;
     if (psiC <= 0.0)  return lo;
     if (psiC >= M_PI) return hi;
     for (int i = 0; i < 120; i++)
@@ -511,7 +565,7 @@ static double insp_lambda_from_psi(double psiC, korb_params *o)
         double mid = 0.5 * (lo + hi);
         if (korb_psifromla(mid, *o) < psiC) lo = mid;
         else                                hi = mid;
-        if (hi - lo <= 4.0 * DBL_EPSILON * o->Vr) break;
+        if (hi - lo <= 4.0 * DBL_EPSILON * Vr) break;
     }
     return 0.5 * (lo + hi);
 }
@@ -530,7 +584,7 @@ static double insp_panel_dist(struct coordinate *xF, korb_params *o, double lam)
 static double insp_peak_lambda_scale(struct coordinate *xF, korb_params *o,
                                      double lamC)
 {
-    const double Vr = o->Vr;
+    const double Vr = inspectre_radial_mino_period(o);
     double d0 = insp_panel_dist(xF, o, lamC);
     if (d0 <= 0.0) return 0.0;
     double dl = 1e-9 * Vr;
@@ -552,7 +606,7 @@ static int insp_panel_find_peaks(struct coordinate *xF, korb_params *o,
                                  double p, double e,
                                  double lamB[2], double dlam[2])
 {
-    const double Vr = o->Vr;
+    const double Vr = inspectre_radial_mino_period(o);
     int nB;
 
     if (e <= 0.0)   /* circular: no radial peak; single arbitrary anchor */
@@ -578,6 +632,58 @@ static int insp_panel_find_peaks(struct coordinate *xF, korb_params *o,
     return nB;
 }
 
+#define INSP_QAG_SCALE_NODES  16     /* coarse prepass mesh for the epsabs floor */
+#define INSP_QAG_NOISE_FACTOR 64.0   /* multiples of DBL_EPSILON tolerated       */
+
+/* Per-component absolute-error floor for the adaptive QAG modes.
+
+   Roundoff in a complex n-mode quantity tracks the modulus of its (re, im)
+   pair, not the individual part. A component whose exact integral vanishes --
+   half of the twelve do on a circular orbit, where the m-carrier cancellation
+   leaves the shifted integrand real -- therefore carries noise ~eps*|pair|,
+   which no epsabs below that level can certify and epsrel cannot bound at all.
+   QAG then bisects to `limit`: at r_f = p, e = 0 the Im(d_theta Phi) component
+   ran 20000 intervals without converging.
+
+   Sample each pair modulus on a coarse mesh plus the closest-approach
+   breakpoints and raise epsabs to the level the integrand actually carries.
+   Costs INSP_QAG_SCALE_NODES + 1 + nPeaks source evaluations for all twelve
+   components, against the 12 * 61 minimum QAG itself needs. */
+static void insp_qag_component_epsabs(int minoTime, inspectre_nmode_params *ip,
+                                      double lo, double hi, double epsabs,
+                                      double *epsabsC)
+{
+    double lamB[2], dlam[2];
+    int nB = insp_panel_find_peaks(ip->xField, ip->orbpar, ip->p, ip->e, lamB, dlam);
+    double scale[6] = { 0.0 };
+    double f[12];
+
+    for (int k = 0; k <= INSP_QAG_SCALE_NODES + nB; k++)
+    {
+        double x;
+        if (k <= INSP_QAG_SCALE_NODES)
+            x = lo + (hi - lo) * (double)k / (double)INSP_QAG_SCALE_NODES;
+        else
+        {
+            double lam = lamB[k - INSP_QAG_SCALE_NODES - 1];
+            x = minoTime ? lam : korb_tfromla(lam, *ip->orbpar);
+        }
+
+        if (minoTime) insp_nmode_components_lambda(x, ip, f);
+        else          insp_nmode_components_time(x, ip, f);
+
+        for (int j = 0; j < 6; j++)
+        {
+            double mod = hypot(f[2 * j], f[2 * j + 1]);
+            if (isfinite(mod) && mod > scale[j]) scale[j] = mod;
+        }
+    }
+
+    for (int c = 0; c < 12; c++)
+        epsabsC[c] = fmax(epsabs, INSP_QAG_NOISE_FACTOR * DBL_EPSILON
+                                  * scale[c / 2] * (hi - lo));
+}
+
 /* Geometric refinement level count toward a peak with lambda-scale dlamPeak,
    for a segment half-width h: halve until the innermost panel is no wider
    than the peak scale, capped at maxLevels. */
@@ -597,7 +703,7 @@ void inspectre_panel_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode
         double omegaPhi, double omegaR,
         inspectre_panel_nodes *out)
 {
-    const double Vr = orbpar->Vr;
+    const double Vr = inspectre_radial_mino_period(orbpar);
     const double Tr = korb_tfromla(Vr, *orbpar);
     out->Vr = Vr;
     out->Tr = Tr;
@@ -791,7 +897,7 @@ void inspectre_integrate_nmode(int mode,
         double *nModePhiS, double *nModeDPhiS, double *nModesrc)
 {
     /* coordinate-time radial period; n-mode amplitude is the period-average */
-    double Tr = korb_tfromla(orbpar->Vr, *orbpar);
+    double Tr = korb_tfromla(inspectre_radial_mino_period(orbpar), *orbpar);
 
     double res[12];
 
@@ -813,11 +919,14 @@ void inspectre_integrate_nmode(int mode,
         F.function = &inspectre_nmode_integrand;
         F.params   = &ip;
 
+        double epsabsC[12];
+        insp_qag_component_epsabs(0, &ip, 0.0, Tr, epsabs, epsabsC);
+
         for (int c = 0; c < 12; c++)
         {
             double result, abserr;
             ip.component = c;
-            int st = gsl_integration_qag(&F, 0.0, Tr, epsabs, epsrel, QAG_LIMIT,
+            int st = gsl_integration_qag(&F, 0.0, Tr, epsabsC[c], epsrel, QAG_LIMIT,
                                 GSL_INTEG_GAUSS61, w, &result, &abserr);
             /* error handler is off, so a nonzero status would otherwise be
                swallowed (result left at 0). GSL_EROUND just means the tolerance
@@ -853,11 +962,15 @@ void inspectre_integrate_nmode(int mode,
         F.function = &inspectre_nmode_integrand_lambda;
         F.params   = &ip;
 
+        const double Vr = inspectre_radial_mino_period(orbpar);
+        double epsabsC[12];
+        insp_qag_component_epsabs(1, &ip, 0.0, Vr, epsabs, epsabsC);
+
         for (int c = 0; c < 12; c++)
         {
             double result, abserr;
             ip.component = c;
-            int st = gsl_integration_qag(&F, 0.0, orbpar->Vr, epsabs, epsrel, QAG_LIMIT,
+            int st = gsl_integration_qag(&F, 0.0, Vr, epsabsC[c], epsrel, QAG_LIMIT,
                                 GSL_INTEG_GAUSS61, w, &result, &abserr);
             if (st == GSL_EMAXITER) {
                 insp_qag_limit_hits++;
@@ -984,7 +1097,7 @@ void inspectre_fft_source_nmodes(struct effsource_equatorial_ctx *ctx, int mMode
         double a, double p, double e, double omegaPhi, double omegaR,
         int N, double *outRe, double *outIm)
 {
-    double Vr = orbpar->Vr;
+    double Vr = inspectre_radial_mino_period(orbpar);
     double Tr = korb_tfromla(Vr, *orbpar);
 
     /* lambda(t) spline so the source can be sampled on a uniform-t grid */
@@ -1091,7 +1204,7 @@ void inspectre_fact_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
     if (NK < 2) NK = 2;
     while (NK < 2 * nKmax + 2 || NK < 2 * NB) NK *= 2;
 
-    const double Vr = orbpar->Vr;
+    const double Vr = inspectre_radial_mino_period(orbpar);
     const double Tr = korb_tfromla(Vr, *orbpar);
     out->NB = NB; out->NK = NK; out->KG = KG;
     out->nMax = nMax; out->nKmax = nKmax;

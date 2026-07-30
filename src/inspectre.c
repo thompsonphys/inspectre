@@ -82,6 +82,7 @@ int main(int argc, char *argv[])
 
     /* All orbital characteristics are calculated and stored inside "orbpar" */
     korb_getparams(eccentric, inclined, a, p, e, x, err, &orbpar);
+    inspectre_orbit_circular_fix(&orbpar);
 
     /* Get the Mino time radial period and sample uniformly over numPeriods
        full periods for numTimePts */

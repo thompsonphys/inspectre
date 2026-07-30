@@ -77,7 +77,15 @@ class Inspectre:
     # -- orbital frequencies (Boyer-Lindquist t) ----------------------------
 
     @property
+    def epicyclic_frequency(self):
+        a, p = self.spin, self.semilatus_rectum
+        R = 1.0 - 6.0 / p + 8.0 * a / p**1.5 - 3.0 * a * a / (p * p)
+        return self.orbit.omega_phi * np.sqrt(max(R, 0.0))
+
+    @property
     def omega_r(self):
+        if self.params.eccentric == 0:
+            return self.epicyclic_frequency
         return self.orbit.omega_r
 
     @property
@@ -92,6 +100,8 @@ class Inspectre:
 
     @property
     def upsilon_r(self):
+        if self.params.eccentric == 0:
+            return self.gamma * self.epicyclic_frequency
         return self.orbit.upsilon_r
 
     @property
@@ -110,6 +120,8 @@ class Inspectre:
 
     @property
     def mino_period_r(self):
+        if self.params.eccentric == 0:
+            return 2.0 * np.pi / self.upsilon_r
         return self.orbit.mino_period_r
 
     @property

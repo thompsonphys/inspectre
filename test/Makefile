@@ -20,9 +20,9 @@ EFFSRCOBJS = $(EFFSRCTESTDIR)/kerr-equatorial-dtcoeffs.o $(EFFSRCTESTDIR)/kerr-e
 all : example numtest verify_lib scantest scansweep recontest
 
 example : example.o
-	$(GCC) $(CFLAGS) -o ../bin/example example.o $(KERRGEODIR)/korb.o $(EFFSRCOBJS) $(LDFLAGS) $(LIBS)
+	$(GCC) $(CFLAGS) -o ../bin/example example.o $(KERRGEODIR)/korb.o $(EFFSRCOBJS) $(INSPOBJS) $(LDFLAGS) $(LIBS)
 
-example.o : example.c
+example.o : example.c ../include/inspectre.h
 	$(GCC) $(CFLAGS) -O3 -c -o example.o example.c
 
 numtest : numtest.o
