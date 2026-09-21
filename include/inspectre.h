@@ -98,26 +98,27 @@ void inspectre_eval_at_time(struct effsource_equatorial_ctx *ctx, int mMode,
    extended precision. Same outputs as _eval_at_lambda_fp minus ddPhiS, which
    calc_m leaves partly NAN. Slower; for grading the double path, not for
    production. */
-void inspectre_eval_gold_at_lambda_fp(struct effsource_equatorial_ctx *ctx,
+void inspectre_eval_extended_at_lambda_fp(struct effsource_equatorial_ctx *ctx,
                               int mMode,
                               const inspectre_field_point *fp, double lambda,
                               korb_params *orbpar, double a, double p, double e,
                               double *PhiS, double *dPhiS, double *src);
 
 /* Source-evaluation counter. Incremented once per puncture/source evaluation by
-   every path (adaptive, node builds, gold). Reset before a batch, read after, to
+   every path (adaptive, node builds, extended). Reset before a batch, read after,
    separate evaluation count from wall time -- QAG additionally pays a Brent
    inversion per evaluation, which timing alone conflates with cost. */
 void inspectre_eval_count_reset(void);
 long inspectre_eval_count(void);
 
 /* Evaluator selected by inspectre_eval_at_lambda_fp, hence by every quadrature
-   that samples through it: 0 = calc_m_offset (double), 1 = calc_m_gold
+   that samples through it: 0 = calc_m_offset (double), 1 = calc_m_extended
    (long-double channel reassembly). Set around a batch to swap the evaluator
    without changing the quadrature, so a double-vs-extended comparison holds the
-   node set fixed. Gold yields no second derivatives, so ddPhiS is zeroed.
+   node set fixed. The extended evaluator yields no second derivatives, so
+   ddPhiS is zeroed.
    INSPECTRE_INTEG_FACT_CONV reads calc_m_split directly and is unaffected. */
-void inspectre_eval_precision_set(int gold);
+void inspectre_eval_precision_set(int extended);
 int  inspectre_eval_precision_get(void);
 
 /* ---------------------------------------------------------------------------

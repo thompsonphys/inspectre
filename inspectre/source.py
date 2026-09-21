@@ -9,49 +9,51 @@ from effsource_equatorial import (
 from effsource_circular import EffsourceContext
 
 try:
-    import effsource_legacy
+    import effsource_original
 except ImportError:
-    effsource_legacy = None
+    effsource_original = None
 
 try:
-    import effsource_legacy_elliptic
+    import effsource_original_agm
 except ImportError:
-    effsource_legacy_elliptic = None
+    effsource_original_agm = None
 
-LEGACY_MODES = {"legacy": effsource_legacy,
-                "legacy_elliptic": effsource_legacy_elliptic}
-_LEGACY_LIVE = {}
+ORBITS = ("equatorial", "circular")
+IMPLS = ("refactored", "original", "original_agm")
+ORIGINAL_IMPLS = {"original": effsource_original,
+                  "original_agm": effsource_original_agm}
+_ORIGINAL_LIVE = {}
 
 
-class _LegacyAdapter:
-    """Global-scope effsource code, one live instance per mode per process.
+class _OriginalAdapter:
+    """Global-scope effsource code, one live instance per impl per process.
 
-    Each mode is its own shared object with its own particle statics, so
-    different modes do not collide and may be live simultaneously.
+    Each impl is its own shared object with its own particle statics, so
+    different impls do not collide and may be live simultaneously.
 
-    Method names match EffsourceEquatorialContext for the subset the legacy
-    API implements. The offset, split and gold methods are absent.
+    Method names match EffsourceEquatorialContext for the subset the original
+    API implements. The offset, split and extended methods are absent.
     """
 
-    def __init__(self, mode, mass, spin):
-        lib = LEGACY_MODES[mode]
+    def __init__(self, impl, mass, spin):
+        lib = ORIGINAL_IMPLS[impl]
         if lib is None:
             raise RuntimeError(
-                f"effsource_{mode} extension not built; rebuild effectivesource "
+                f"effsource_{impl} extension not built; rebuild effectivesource "
                 "with `pip install -e ../effectivesource`."
             )
-        ref = _LEGACY_LIVE.get(mode)
+        ref = _ORIGINAL_LIVE.get(impl)
         live = ref() if ref is not None else None
         if live is not None:
             raise RuntimeError(
-                f"mode={mode!r} is global state, and an EffectiveSource is "
+                f"impl={impl!r} is global state, and an EffectiveSource is "
                 f"already alive with mass={live.mass}, spin={live.spin}. "
                 "Release it before creating another."
             )
-        self.mode, self.lib = mode, lib
+        self.impl, self.lib = impl, lib
         self.mass, self.spin = mass, spin
         lib.effsource_init(mass, spin)
-        _LEGACY_LIVE[mode] = weakref.ref(self)
+        _ORIGINAL_LIVE[impl] = weakref.ref(self)
 
     def set_particle(self, x_p, E, L, ur):
         """(coordinate, E, L, ur) -> None."""
@@ -111,33 +113,52 @@ class EffectiveSource:
         Black hole spin parameter (a/M).
     mass : float
         Black hole mass, default 1.0.
-    mode : str
-        Which effective-source module to use: "circular", "equatorial",
-        "legacy" or "legacy_elliptic". The last two are the original
-        global-scope equatorial code, the second with K and E evaluated from
-        the complementary parameter by AGM; one live instance of each per
-        process.
+    orbit : str
+        Orbit geometry: "equatorial" or "circular".
+    impl : str
+        Which implementation of that geometry: "refactored" (the context-based
+        code in use), "original" (as published at upstream 07a31ce), or
+        "original_agm" (original with K and E evaluated from the complementary
+        parameter by AGM). The two original impls are global state, one live
+        instance of each per process.
     """
 
-    def __init__(self, mass=1.0, spin=0.0, mode="equatorial", **kwargs):
-        self.mode = mode
+    def __init__(self, mass=1.0, spin=0.0, orbit="equatorial",
+                 impl="refactored", **kwargs):
+        if "mode" in kwargs:
+            raise TypeError(
+                "EffectiveSource no longer takes mode=; it took two unrelated "
+                "axes at once. Use orbit= for the geometry "
+                f"({' / '.join(ORBITS)}) and impl= for the implementation "
+                f"({' / '.join(IMPLS)}). mode= now means only the quadrature "
+                "selector on the integrate_nmode routines."
+            )
+        if orbit not in ORBITS:
+            raise ValueError(f"orbit must be one of {ORBITS}, got {orbit!r}")
+        if impl not in IMPLS:
+            raise ValueError(f"impl must be one of {IMPLS}, got {impl!r}")
+
+        self.orbit = orbit
+        self.impl = impl
         self.mass = mass
         self.spin = spin
 
-        if mode == "circular":
+        if impl != "refactored" and orbit != "equatorial":
+            raise NotImplementedError(
+                f"orbit={orbit!r} has no {impl!r} build. The original circular "
+                "code is effectivesource/kerr-circular.c, which no extension "
+                "currently compiles."
+            )
+
+        if impl != "refactored":
+            self._ef = _OriginalAdapter(impl, mass, spin)
+            self._ef.lib.disable_gsl_error_handler()
+        elif orbit == "circular":
             self._ef = EffsourceContext(mass, spin)
             disable_gsl_error_handler()
-        elif mode == "equatorial":
+        else:
             self._ef = EffsourceEquatorialContext(mass, spin)
             disable_gsl_error_handler()
-        elif mode in LEGACY_MODES:
-            self._ef = _LegacyAdapter(mode, mass, spin)
-            self._ef.lib.disable_gsl_error_handler()
-        else:
-            raise ValueError(
-                "mode must be 'circular', 'equatorial', 'legacy' or "
-                f"'legacy_elliptic', got {mode!r}"
-            )
 
     @staticmethod
     def make_coordinate(t, r, theta, phi):

@@ -17,7 +17,7 @@ Each cell is run once per arm, where an arm is an evaluator crossed with a
 field-point route.
 
     evaluator  f64  effsource calc_m_offset, kernel channels reassembled in double
-               ld   effsource calc_m_gold, the same channels in long double
+               ld   effsource calc_m_extended, the same channels in long double
     route      dtheta  theta - pi/2 handed to C directly, full relative accuracy
                theta   absolute theta = pi/2 + dtheta, differenced inside C
 
@@ -75,7 +75,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import inspectre_c
-from inspectre import Inspectre, eval_precision
+from inspectre import Inspectre, extended_precision
 
 # (name, block index in the (PhiS, dPhiS, src) result tuple, real-part offset)
 OUTPUTS = (("Phi", 0, 0), ("drPhi", 1, 2), ("dthetaPhi", 1, 4), ("src", 2, 0))
@@ -312,7 +312,7 @@ def run_reference(insp, cfg, r, dth):
         return lambda: insp.panel_nmodes_fast(
             cfg.m, n_list, r, None, dtheta=dth, order=order, max_levels=levels)
 
-    with eval_precision(True):
+    with extended_precision(True):
         res, dt, evals, _ = measure(build(cfg.ref_order, cfg.ref_levels))
         lo = None
         if cfg.ref_check:
@@ -396,7 +396,7 @@ def run_cell(insp, cfg, ir, r, r_class, iz, z, dth, want, cached_ref=None):
         ref, ref0, refsc, ref_dt, ref_evals = run_reference(insp, cfg, r, dth)
     rows = []
     for arm in cfg.arms:
-        with eval_precision(arm_base(arm) == "ld"):
+        with extended_precision(arm_base(arm) == "ld"):
             for method in cfg.methods:
                 if (arm, method) not in want:
                     continue

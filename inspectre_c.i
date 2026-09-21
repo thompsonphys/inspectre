@@ -83,13 +83,13 @@ def _fp_pick(xField, fnAbs, fnFp):
     return fnFp if isinstance(xField, inspectre_field_point) else fnAbs
 
 
-def eval_gold_at_lambda(ctx, mMode, fp, lam, orbpar, a, p, e):
+def eval_extended_at_lambda(ctx, mMode, fp, lam, orbpar, a, p, e):
     """Reference evaluator: split channels reassembled in long double.
 
     Requires an inspectre_field_point. Returns (PhiS[2], dPhiS[8], src[2]).
     """
     PhiS = doubleArray(2); dPhiS = doubleArray(8); src = doubleArray(2)
-    inspectre_eval_gold_at_lambda_fp(ctx, mMode, fp, lam, orbpar, a, p, e,
+    inspectre_eval_extended_at_lambda_fp(ctx, mMode, fp, lam, orbpar, a, p, e,
                                      PhiS.cast(), dPhiS.cast(), src.cast())
     return ([PhiS[0], PhiS[1]],
             [dPhiS[i] for i in range(8)],

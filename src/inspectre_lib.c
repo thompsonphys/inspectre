@@ -141,9 +141,9 @@ long inspectre_eval_count(void) { return insp_eval_hits; }
    that samples through it. Held as state rather than passed as an argument so the
    integrator signatures stay put and the node geometry is provably identical
    across the two arms of a precision comparison. */
-static int insp_eval_gold = 0;
-void inspectre_eval_precision_set(int gold) { insp_eval_gold = gold ? 1 : 0; }
-int  inspectre_eval_precision_get(void) { return insp_eval_gold; }
+static int insp_eval_extended = 0;
+void inspectre_eval_precision_set(int extended) { insp_eval_extended = extended ? 1 : 0; }
+int  inspectre_eval_precision_get(void) { return insp_eval_extended; }
 
 /* Seat the effsource context on the particle at this Mino time and return the
    field-point offsets. r_p(psi) = p/(1 + e cos psi) is re-evaluated in extended
@@ -186,9 +186,9 @@ void inspectre_eval_at_lambda_fp(struct effsource_equatorial_ctx *ctx, int mMode
     insp_seat_particle(ctx, fp, lambda, orbpar, a, p, e, &dr, &dtheta);
     insp_eval_hits++;
 
-    if (insp_eval_gold)
+    if (insp_eval_extended)
     {
-        effsource_equatorial_ctx_calc_m_gold(ctx, mMode, dr, dtheta,
+        effsource_equatorial_ctx_calc_m_extended(ctx, mMode, dr, dtheta,
                                              PhiS, dPhiS, src);
         if (ddPhiS)
             for (int i = 0; i < 20; i++)
@@ -211,7 +211,7 @@ void inspectre_eval_at_lambda(struct effsource_equatorial_ctx *ctx, int mMode,
                                 PhiS, dPhiS, ddPhiS, src);
 }
 
-void inspectre_eval_gold_at_lambda_fp(struct effsource_equatorial_ctx *ctx,
+void inspectre_eval_extended_at_lambda_fp(struct effsource_equatorial_ctx *ctx,
                               int mMode,
                               const inspectre_field_point *fp, double lambda,
                               korb_params *orbpar, double a, double p, double e,
@@ -221,7 +221,7 @@ void inspectre_eval_gold_at_lambda_fp(struct effsource_equatorial_ctx *ctx,
     insp_seat_particle(ctx, fp, lambda, orbpar, a, p, e, &dr, &dtheta);
     insp_eval_hits++;
 
-    effsource_equatorial_ctx_calc_m_gold(ctx, mMode, dr, dtheta,
+    effsource_equatorial_ctx_calc_m_extended(ctx, mMode, dr, dtheta,
                                          PhiS, dPhiS, src);
 }
 

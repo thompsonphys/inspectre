@@ -16,19 +16,18 @@ except ImportError:
 
 
 @contextlib.contextmanager
-def eval_precision(gold):
-    """Swap the C evaluator for the duration of the block.
+def extended_precision(enabled=True):
+    """Route the C evaluator through calc_m_extended for the duration of the block.
 
-    gold=True routes every quadrature that samples through
-    inspectre_eval_at_lambda_fp -- QAG, QAG_MINO, MINO_SPLINE, PANEL_GL, the
-    sample builds -- through calc_m_gold instead of calc_m_offset, leaving the
+    Affects every quadrature that samples through inspectre_eval_at_lambda_fp
+    -- QAG, QAG_MINO, MINO_SPLINE, PANEL_GL, the sample builds -- leaving the
     node geometry untouched. FACT_CONV reads calc_m_split directly and is
-    unaffected. Second derivatives come back zero in the gold arm.
+    unaffected. Second derivatives come back zero.
     """
     if inspectre_c is None:
         raise RuntimeError("inspectre_c extension not built")
     prev = inspectre_c.inspectre_eval_precision_get()
-    inspectre_c.inspectre_eval_precision_set(1 if gold else 0)
+    inspectre_c.inspectre_eval_precision_set(1 if enabled else 0)
     try:
         yield
     finally:
@@ -60,18 +59,27 @@ class Inspectre:
         x=1.0,
         mass=1.0,
         err=1e-15,
-        mode="equatorial",
+        orbit="equatorial",
+        impl="refactored",
         **kwargs,
     ):
+        if "mode" in kwargs:
+            raise TypeError(
+                "Inspectre no longer takes mode=; use orbit= for the geometry "
+                "and impl= for the implementation. mode= now means only the "
+                "quadrature selector on the integrate_nmode routines."
+            )
+        self.orbit = orbit
+        self.impl = impl
 
-        self.orbit = KerrOrbit(
+        self.geodesic = KerrOrbit(
             spin=spin,
             semilatus_rectum=semilatus_rectum,
             eccentricity=eccentricity,
             x=x,
             err=err,
         )
-        self.es = EffectiveSource(mass=mass, spin=spin, mode=mode)
+        self.es = EffectiveSource(mass=mass, spin=spin, orbit=orbit, impl=impl)
 
         self._trajectory_exists = False
         self._trajectory_resampled = False
@@ -79,7 +87,7 @@ class Inspectre:
         self._old_traj = None
 
     def __del__(self):
-        for attr in ("orbit", "es"):
+        for attr in ("geodesic", "es"):
             if hasattr(self, attr):
                 delattr(self, attr)
 
@@ -87,15 +95,15 @@ class Inspectre:
 
     @property
     def energy(self):
-        return self.orbit.energy
+        return self.geodesic.energy
 
     @property
     def angular_momentum(self):
-        return self.orbit.angular_momentum
+        return self.geodesic.angular_momentum
 
     @property
     def carter_constant(self):
-        return self.orbit.carter_constant
+        return self.geodesic.carter_constant
 
     # -- orbital frequencies (Boyer-Lindquist t) ----------------------------
 
@@ -103,21 +111,21 @@ class Inspectre:
     def epicyclic_frequency(self):
         a, p = self.spin, self.semilatus_rectum
         R = 1.0 - 6.0 / p + 8.0 * a / p**1.5 - 3.0 * a * a / (p * p)
-        return self.orbit.omega_phi * np.sqrt(max(R, 0.0))
+        return self.geodesic.omega_phi * np.sqrt(max(R, 0.0))
 
     @property
     def omega_r(self):
         if self.params.eccentric == 0:
             return self.epicyclic_frequency
-        return self.orbit.omega_r
+        return self.geodesic.omega_r
 
     @property
     def omega_theta(self):
-        return self.orbit.omega_theta
+        return self.geodesic.omega_theta
 
     @property
     def omega_phi(self):
-        return self.orbit.omega_phi
+        return self.geodesic.omega_phi
 
     # -- Mino-time frequencies ----------------------------------------------
 
@@ -125,19 +133,19 @@ class Inspectre:
     def upsilon_r(self):
         if self.params.eccentric == 0:
             return self.gamma * self.epicyclic_frequency
-        return self.orbit.upsilon_r
+        return self.geodesic.upsilon_r
 
     @property
     def upsilon_theta(self):
-        return self.orbit.upsilon_theta
+        return self.geodesic.upsilon_theta
 
     @property
     def upsilon_phi(self):
-        return self.orbit.upsilon_phi
+        return self.geodesic.upsilon_phi
 
     @property
     def gamma(self):
-        return self.orbit.gamma
+        return self.geodesic.gamma
 
     # -- Mino-time periods --------------------------------------------------
 
@@ -145,60 +153,60 @@ class Inspectre:
     def mino_period_r(self):
         if self.params.eccentric == 0:
             return 2.0 * np.pi / self.upsilon_r
-        return self.orbit.mino_period_r
+        return self.geodesic.mino_period_r
 
     @property
     def mino_period_theta(self):
-        return self.orbit.mino_period_theta
+        return self.geodesic.mino_period_theta
 
     # -- orbital element access ---------------------------------------------
 
     @property
     def spin(self):
-        return self.orbit.spin
+        return self.geodesic.spin
 
     @property
     def semilatus_rectum(self):
-        return self.orbit.semilatus_rectum
+        return self.geodesic.semilatus_rectum
 
     @property
     def eccentricity(self):
-        return self.orbit.eccentricity
+        return self.geodesic.eccentricity
 
     @property
     def x(self):
-        return self.orbit.x
+        return self.geodesic.x
 
     @property
     def params(self):
         """Direct access to the underlying korb_params struct."""
-        return self.orbit.params
+        return self.geodesic.params
 
     # -- trajectory evaluation ----------------------------------------------
 
     def psi_from_lambda(self, lam):
         """chi_r from Mino time."""
-        return self.orbit.psi_from_lambda(lam)
+        return self.geodesic.psi_from_lambda(lam)
 
     def r_from_lambda(self, lam):
         """Boyer-Lindquist r from lambda through chi_r."""
-        return self.orbit.r_from_lambda(lam)
+        return self.geodesic.r_from_lambda(lam)
 
     def t_from_lambda(self, lam):
         """Boyer-Lindquist t from Mino time."""
-        return self.orbit.t_from_lambda(lam)
+        return self.geodesic.t_from_lambda(lam)
 
     def phi_from_lambda(self, lam):
         """Boyer-Lindquist phi from Mino time."""
-        return self.orbit.phi_from_lambda(lam)
+        return self.geodesic.phi_from_lambda(lam)
 
     def theta_from_lambda(self, lam):
         """Boyer-Lindquist theta from Mino time."""
-        return self.orbit.theta_from_lambda(lam)
+        return self.geodesic.theta_from_lambda(lam)
 
     def four_velocity_equatorial(self, lam):
         """Compute u^r for equatorial orbits from lambda through chi_r."""
-        return self.orbit.four_velocity_equatorial(lam)
+        return self.geodesic.four_velocity_equatorial(lam)
 
     # -- Set Source Functions -----------------------------------------------
 
@@ -392,17 +400,17 @@ class Inspectre:
     @property
     def _ctx(self):
         """Raw effsource_equatorial_ctx pointer (borrowed; owned by self.es)."""
-        if self.es.mode.startswith("legacy"):
+        if self.es.impl != "refactored":
             raise RuntimeError(
-                f"mode={self.es.mode!r} has no effsource_equatorial_ctx; the "
-                "*_fast and n-mode routines require mode='equatorial'."
+                f"impl={self.es.impl!r} has no effsource_equatorial_ctx; the "
+                "*_fast and n-mode routines require impl='refactored'."
             )
         return self.es._ef._ctx
 
     @property
     def _orbpar(self):
-        """Raw korb_params pointer (borrowed; owned by self.orbit)."""
-        return self.orbit._params
+        """Raw korb_params pointer (borrowed; owned by self.geodesic)."""
+        return self.geodesic._params
 
     def _field_point(self, r_field, theta_field, phi_field=0.0, dtheta=None):
         """Field point for the C entry points.
