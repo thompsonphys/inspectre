@@ -1,3 +1,5 @@
+import weakref
+
 import numpy as np
 from effsource_equatorial import (
     make_coordinate,
@@ -5,6 +7,99 @@ from effsource_equatorial import (
     disable_gsl_error_handler,
 )
 from effsource_circular import EffsourceContext
+
+try:
+    import effsource_legacy
+except ImportError:
+    effsource_legacy = None
+
+try:
+    import effsource_legacy_elliptic
+except ImportError:
+    effsource_legacy_elliptic = None
+
+LEGACY_MODES = {"legacy": effsource_legacy,
+                "legacy_elliptic": effsource_legacy_elliptic}
+_LEGACY_LIVE = {}
+
+
+class _LegacyAdapter:
+    """Global-scope effsource code, one live instance per mode per process.
+
+    Each mode is its own shared object with its own particle statics, so
+    different modes do not collide and may be live simultaneously.
+
+    Method names match EffsourceEquatorialContext for the subset the legacy
+    API implements. The offset, split and gold methods are absent.
+    """
+
+    def __init__(self, mode, mass, spin):
+        lib = LEGACY_MODES[mode]
+        if lib is None:
+            raise RuntimeError(
+                f"effsource_{mode} extension not built; rebuild effectivesource "
+                "with `pip install -e ../effectivesource`."
+            )
+        ref = _LEGACY_LIVE.get(mode)
+        live = ref() if ref is not None else None
+        if live is not None:
+            raise RuntimeError(
+                f"mode={mode!r} is global state, and an EffectiveSource is "
+                f"already alive with mass={live.mass}, spin={live.spin}. "
+                "Release it before creating another."
+            )
+        self.mode, self.lib = mode, lib
+        self.mass, self.spin = mass, spin
+        lib.effsource_init(mass, spin)
+        _LEGACY_LIVE[mode] = weakref.ref(self)
+
+    def set_particle(self, x_p, E, L, ur):
+        """(coordinate, E, L, ur) -> None."""
+        self.lib.effsource_set_particle(x_p, E, L, ur)
+
+    def calc_PhiS(self, x):
+        """coordinate -> PhiS."""
+        buf = self.lib.doubleArray(1)
+        self.lib.effsource_PhiS(x, buf.cast())
+        return buf[0]
+
+    def calc_PhiS_m(self, m, x):
+        """(m, coordinate) -> (Re, Im)."""
+        buf = self.lib.doubleArray(2)
+        self.lib.effsource_PhiS_m(m, x, buf.cast())
+        return buf[0], buf[1]
+
+    def calc(self, x):
+        """coordinate -> (PhiS, dPhiS[4], d2PhiS[10], src)."""
+        _PhiS = self.lib.doubleArray(1)
+        _dPhiS = self.lib.doubleArray(4)
+        _d2PhiS = self.lib.doubleArray(10)
+        _src = self.lib.doubleArray(1)
+        self.lib.effsource_calc(
+            x, _PhiS.cast(), _dPhiS.cast(), _d2PhiS.cast(), _src.cast()
+        )
+        return (
+            _PhiS[0],
+            [_dPhiS[i] for i in range(4)],
+            [_d2PhiS[i] for i in range(10)],
+            _src[0],
+        )
+
+    def calc_m(self, m, x):
+        """(m, coordinate) -> (PhiS[2], dPhiS[8], d2PhiS[20], src[2])."""
+        _PhiS = self.lib.doubleArray(2)
+        _dPhiS = self.lib.doubleArray(8)
+        _d2PhiS = self.lib.doubleArray(20)
+        _src = self.lib.doubleArray(2)
+        self.lib.effsource_calc_m(
+            m, x, _PhiS.cast(), _dPhiS.cast(), _d2PhiS.cast(), _src.cast()
+        )
+        return (
+            [_PhiS[i] for i in range(2)],
+            [_dPhiS[i] for i in range(8)],
+            [_d2PhiS[i] for i in range(20)],
+            [_src[i] for i in range(2)],
+        )
 
 
 class EffectiveSource:
@@ -17,7 +112,11 @@ class EffectiveSource:
     mass : float
         Black hole mass, default 1.0.
     mode : str
-        Which effective-source module to use: "circular" or "equatorial".
+        Which effective-source module to use: "circular", "equatorial",
+        "legacy" or "legacy_elliptic". The last two are the original
+        global-scope equatorial code, the second with K and E evaluated from
+        the complementary parameter by AGM; one live instance of each per
+        process.
     """
 
     def __init__(self, mass=1.0, spin=0.0, mode="equatorial", **kwargs):
@@ -31,8 +130,14 @@ class EffectiveSource:
         elif mode == "equatorial":
             self._ef = EffsourceEquatorialContext(mass, spin)
             disable_gsl_error_handler()
+        elif mode in LEGACY_MODES:
+            self._ef = _LegacyAdapter(mode, mass, spin)
+            self._ef.lib.disable_gsl_error_handler()
         else:
-            raise ValueError(f"mode must be 'circular' or 'equatorial', got {mode!r}")
+            raise ValueError(
+                "mode must be 'circular', 'equatorial', 'legacy' or "
+                f"'legacy_elliptic', got {mode!r}"
+            )
 
     @staticmethod
     def make_coordinate(t, r, theta, phi):

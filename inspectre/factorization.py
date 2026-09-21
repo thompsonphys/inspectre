@@ -111,11 +111,18 @@ def nmodes_by_convolution(R, kernels, n_list, KG=400):
     ks = np.arange(-KG, KG + 1)
     cc = {name: c[name][ks % NB] for name in ("L", "P1", "P2", "P3", "P4", "P5")}
 
+    # Accumulate in extended precision, as inspectre_fact_nodes_integrate does.
+    # The channels cancel against each other in Fourier space just as they do
+    # pointwise: for src, sum|term| / |result| runs 2.6e9 at n = 0 to 1.7e12 at
+    # n = 32 over ~1500 terms, so a float64 accumulator loses 5e-08 to 6e-05.
+    # PhiS cancels by only ~5 and is indifferent.
+    LD = np.clongdouble
+
     def one(n):
-        s = c["A"][n % NB]
+        s = LD(c["A"][n % NB])
         for name in ("L", "P1", "P2", "P3", "P4", "P5"):
-            s += np.sum(cc[name] * K[name][(n - ks) % NK])
-        return s
+            s += np.sum(cc[name].astype(LD) * K[name][(n - ks) % NK].astype(LD))
+        return complex(s)
 
     return np.array([one(int(n)) for n in n_list])
 

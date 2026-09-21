@@ -64,6 +64,38 @@ def _unpack(PhiS, dPhiS, ddPhiS, src):
     )
 
 
+def make_field_point(r, dtheta, phi=0.0):
+    """Field point carrying dtheta = theta - pi/2 directly.
+
+    Pass the result anywhere xField is accepted; the wrappers dispatch to the
+    _fp entry points. Routing dtheta through an absolute theta instead caps its
+    relative accuracy at 1.1e-16/dtheta.
+    """
+    fp = inspectre_field_point()
+    fp.r = r
+    fp.dtheta = dtheta
+    fp.phi = phi
+    return fp
+
+
+def _fp_pick(xField, fnAbs, fnFp):
+    """Select the absolute-coordinate or offset entry point for this field point."""
+    return fnFp if isinstance(xField, inspectre_field_point) else fnAbs
+
+
+def eval_gold_at_lambda(ctx, mMode, fp, lam, orbpar, a, p, e):
+    """Reference evaluator: split channels reassembled in long double.
+
+    Requires an inspectre_field_point. Returns (PhiS[2], dPhiS[8], src[2]).
+    """
+    PhiS = doubleArray(2); dPhiS = doubleArray(8); src = doubleArray(2)
+    inspectre_eval_gold_at_lambda_fp(ctx, mMode, fp, lam, orbpar, a, p, e,
+                                     PhiS.cast(), dPhiS.cast(), src.cast())
+    return ([PhiS[0], PhiS[1]],
+            [dPhiS[i] for i in range(8)],
+            [src[0], src[1]])
+
+
 def eval_at_lambda(ctx, mMode, xField, lam, orbpar, a, p, e):
     """Effective source + puncture at Mino time lambda.
 
@@ -71,8 +103,9 @@ def eval_at_lambda(ctx, mMode, xField, lam, orbpar, a, p, e):
     """
     PhiS = doubleArray(2); dPhiS = doubleArray(8)
     ddPhiS = doubleArray(20); src = doubleArray(2)
-    inspectre_eval_at_lambda(ctx, mMode, xField, lam, orbpar, a, p, e,
-                             PhiS.cast(), dPhiS.cast(), ddPhiS.cast(), src.cast())
+    _f = _fp_pick(xField, inspectre_eval_at_lambda, inspectre_eval_at_lambda_fp)
+    _f(ctx, mMode, xField, lam, orbpar, a, p, e,
+       PhiS.cast(), dPhiS.cast(), ddPhiS.cast(), src.cast())
     return _unpack(PhiS, dPhiS, ddPhiS, src)
 
 
@@ -83,8 +116,9 @@ def eval_at_time(ctx, mMode, xField, t, orbpar, a, p, e):
     """
     PhiS = doubleArray(2); dPhiS = doubleArray(8)
     ddPhiS = doubleArray(20); src = doubleArray(2)
-    inspectre_eval_at_time(ctx, mMode, xField, t, orbpar, a, p, e,
-                           PhiS.cast(), dPhiS.cast(), ddPhiS.cast(), src.cast())
+    _f = _fp_pick(xField, inspectre_eval_at_time, inspectre_eval_at_time_fp)
+    _f(ctx, mMode, xField, t, orbpar, a, p, e,
+       PhiS.cast(), dPhiS.cast(), ddPhiS.cast(), src.cast())
     return _unpack(PhiS, dPhiS, ddPhiS, src)
 
 
@@ -107,10 +141,11 @@ def integrate_nmode(mode, ctx, mMode, nMode, xField, orbpar, a, p, e,
     _d, dP = _to_array(derivSamples)
     _s, sP = _to_array(srcSamples)
     nPhiS = doubleArray(2); nDPhiS = doubleArray(8); nsrc = doubleArray(2)
-    inspectre_integrate_nmode(mode, ctx, mMode, nMode, xField, orbpar, a, p, e,
-                              omegaPhi, omegaR, epsabs, epsrel,
-                              tP, fP, dP, sP, nSamples,
-                              nPhiS.cast(), nDPhiS.cast(), nsrc.cast())
+    _f = _fp_pick(xField, inspectre_integrate_nmode, inspectre_integrate_nmode_fp)
+    _f(mode, ctx, mMode, nMode, xField, orbpar, a, p, e,
+       omegaPhi, omegaR, epsabs, epsrel,
+       tP, fP, dP, sP, nSamples,
+       nPhiS.cast(), nDPhiS.cast(), nsrc.cast())
     return ([nPhiS[0], nPhiS[1]],
             [nDPhiS[i] for i in range(8)],
             [nsrc[0], nsrc[1]])
@@ -122,8 +157,10 @@ def fft_source_nmodes(ctx, mMode, xField, orbpar, a, p, e, omegaPhi, omegaR, N):
     Returns (outRe[N], outIm[N]); bin k holds mode n = k if k<=N/2 else k-N.
     """
     outRe = doubleArray(N); outIm = doubleArray(N)
-    inspectre_fft_source_nmodes(ctx, mMode, xField, orbpar, a, p, e,
-                                omegaPhi, omegaR, N, outRe.cast(), outIm.cast())
+    _f = _fp_pick(xField, inspectre_fft_source_nmodes,
+                  inspectre_fft_source_nmodes_fp)
+    _f(ctx, mMode, xField, orbpar, a, p, e,
+       omegaPhi, omegaR, N, outRe.cast(), outIm.cast())
     return [outRe[i] for i in range(N)], [outIm[i] for i in range(N)]
 
 
@@ -133,7 +170,9 @@ def mino_samples_build(ctx, mMode, xField, orbpar, a, p, e, nSamples):
     Returns an inspectre_mino_samples handle; free it with mino_samples_free.
     """
     s = inspectre_mino_samples()
-    inspectre_mino_samples_build(ctx, mMode, xField, orbpar, a, p, e, nSamples, s)
+    _f = _fp_pick(xField, inspectre_mino_samples_build,
+                  inspectre_mino_samples_build_fp)
+    _f(ctx, mMode, xField, orbpar, a, p, e, nSamples, s)
     return s
 
 
@@ -162,8 +201,10 @@ def panel_nodes_build(ctx, mMode, xField, orbpar, a, p, e, omegaPhi, omegaR,
     inspectre_panel_nodes handle; free it with panel_nodes_free.
     """
     s = inspectre_panel_nodes()
-    inspectre_panel_nodes_build(ctx, mMode, xField, orbpar, a, p, e,
-                                order, maxLevels, nMax, omegaPhi, omegaR, s)
+    _f = _fp_pick(xField, inspectre_panel_nodes_build,
+                  inspectre_panel_nodes_build_fp)
+    _f(ctx, mMode, xField, orbpar, a, p, e,
+       order, maxLevels, nMax, omegaPhi, omegaR, s)
     return s
 
 
@@ -193,8 +234,10 @@ def fact_nodes_build(ctx, mMode, xField, orbpar, a, p, e, omegaPhi, omegaR,
     it with fact_nodes_free.
     """
     s = inspectre_fact_nodes()
-    inspectre_fact_nodes_build(ctx, mMode, xField, orbpar, a, p, e,
-                               NB, NK, KG, nMax, omegaPhi, omegaR, s)
+    _f = _fp_pick(xField, inspectre_fact_nodes_build,
+                  inspectre_fact_nodes_build_fp)
+    _f(ctx, mMode, xField, orbpar, a, p, e,
+       NB, NK, KG, nMax, omegaPhi, omegaR, s)
     return s
 
 

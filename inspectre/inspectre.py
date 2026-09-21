@@ -1,3 +1,5 @@
+import contextlib
+
 from kerrgeodesics import KerrOrbit
 from .source import EffectiveSource
 import numpy as np
@@ -11,6 +13,26 @@ try:
     import inspectre_c
 except ImportError:
     inspectre_c = None
+
+
+@contextlib.contextmanager
+def eval_precision(gold):
+    """Swap the C evaluator for the duration of the block.
+
+    gold=True routes every quadrature that samples through
+    inspectre_eval_at_lambda_fp -- QAG, QAG_MINO, MINO_SPLINE, PANEL_GL, the
+    sample builds -- through calc_m_gold instead of calc_m_offset, leaving the
+    node geometry untouched. FACT_CONV reads calc_m_split directly and is
+    unaffected. Second derivatives come back zero in the gold arm.
+    """
+    if inspectre_c is None:
+        raise RuntimeError("inspectre_c extension not built")
+    prev = inspectre_c.inspectre_eval_precision_get()
+    inspectre_c.inspectre_eval_precision_set(1 if gold else 0)
+    try:
+        yield
+    finally:
+        inspectre_c.inspectre_eval_precision_set(prev)
 
 
 def set_array(duration, num_pts, buffer=0):
@@ -57,8 +79,9 @@ class Inspectre:
         self._old_traj = None
 
     def __del__(self):
-        del self.orbit
-        del self.es
+        for attr in ("orbit", "es"):
+            if hasattr(self, attr):
+                delattr(self, attr)
 
     # -- orbital constants --------------------------------------------------
 
@@ -369,6 +392,11 @@ class Inspectre:
     @property
     def _ctx(self):
         """Raw effsource_equatorial_ctx pointer (borrowed; owned by self.es)."""
+        if self.es.mode.startswith("legacy"):
+            raise RuntimeError(
+                f"mode={self.es.mode!r} has no effsource_equatorial_ctx; the "
+                "*_fast and n-mode routines require mode='equatorial'."
+            )
         return self.es._ef._ctx
 
     @property
@@ -376,26 +404,40 @@ class Inspectre:
         """Raw korb_params pointer (borrowed; owned by self.orbit)."""
         return self.orbit._params
 
-    def eval_at_lambda_fast(self, m, lam, r_field, theta_field, phi_field=0.0):
+    def _field_point(self, r_field, theta_field, phi_field=0.0, dtheta=None):
+        """Field point for the C entry points.
+
+        With dtheta given, returns an inspectre_field_point carrying the polar
+        offset directly and theta_field is ignored; routing dtheta through an
+        absolute theta instead caps its relative accuracy at
+        eps/2 dtheta = 1.1e-16/dtheta, which dominates below dtheta ~ 1e-8.
+        """
+        if dtheta is not None:
+            return inspectre_c.make_field_point(r_field, dtheta, phi_field)
+        return self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+
+    def eval_at_lambda_fast(self, m, lam, r_field, theta_field, phi_field=0.0,
+                            dtheta=None):
         """C eval of puncture + effective source at Mino time lambda.
 
         Returns (PhiS[2], dPhiS[8], ddPhiS[20], src[2]) as lists (Re/Im interleaved).
         """
         self._require_c()
-        xF = self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+        xF = self._field_point(r_field, theta_field, phi_field, dtheta)
         return inspectre_c.eval_at_lambda(
             self._ctx, m, xF, lam, self._orbpar,
             self.spin, self.semilatus_rectum, self.eccentricity,
         )
 
-    def eval_at_time_fast(self, m, t, r_field, theta_field, phi_field=0.0):
+    def eval_at_time_fast(self, m, t, r_field, theta_field, phi_field=0.0,
+                          dtheta=None):
         """C eval of puncture + effective source at coordinate time t.
 
         Brent-inverts lambda(t) internally. Returns
         (PhiS[2], dPhiS[8], ddPhiS[20], src[2]) as lists (Re/Im interleaved).
         """
         self._require_c()
-        xF = self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+        xF = self._field_point(r_field, theta_field, phi_field, dtheta)
         return inspectre_c.eval_at_time(
             self._ctx, m, xF, t, self._orbpar,
             self.spin, self.semilatus_rectum, self.eccentricity,
@@ -413,6 +455,7 @@ class Inspectre:
     _SAMPLE_BASED_MODES = None  # populated lazily once inspectre_c is importable
 
     def integrate_nmode_fast(self, m, n, r_field, theta_field, phi_field=0.0,
+                             dtheta=None,
                              mode=None, nSamples=257, epsabs=1e-10, epsrel=1e-10):
         """C n-mode Fourier amplitude over one radial period.
 
@@ -431,13 +474,13 @@ class Inspectre:
                 inspectre_c.INSPECTRE_INTEG_SIMPSON,
                 inspectre_c.INSPECTRE_INTEG_SPLINE,
             }
-        xF = self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+        xF = self._field_point(r_field, theta_field, phi_field, dtheta)
 
         tSamples = fieldSamples = derivSamples = srcSamples = None
         if mode in Inspectre._SAMPLE_BASED_MODES:
             tSamples, fieldSamples, derivSamples, srcSamples = \
                 self._build_nmode_samples(m, r_field, theta_field, phi_field,
-                                          nSamples)
+                                          nSamples, dtheta=dtheta)
 
         return inspectre_c.integrate_nmode(
             mode, self._ctx, m, n, xF, self._orbpar,
@@ -448,7 +491,8 @@ class Inspectre:
             nSamples=nSamples,
         )
 
-    def _build_nmode_samples(self, m, r_field, theta_field, phi_field, nSamples):
+    def _build_nmode_samples(self, m, r_field, theta_field, phi_field, nSamples,
+                             dtheta=None):
         """Closed uniform-t timeseries of the puncture/source for sample-based
         n-mode quadrature.
 
@@ -458,6 +502,9 @@ class Inspectre:
         so the trapezoid/Simpson rules close the wrap interval -- matching the
         reference sampling in test/recontest.c.
         """
+        if nSamples < 3:
+            raise ValueError(
+                f"nSamples = {nSamples} cannot span a period; need at least 3")
         Tr = 2.0 * np.pi / self.omega_r
         tSamples = [0.0] * nSamples
         fieldSamples = [0.0] * (2 * nSamples)
@@ -466,7 +513,7 @@ class Inspectre:
         for i in range(nSamples):
             t = i / (nSamples - 1) * Tr
             PhiS, dPhiS, _ddPhiS, src = self.eval_at_time_fast(
-                m, t, r_field, theta_field, phi_field)
+                m, t, r_field, theta_field, phi_field, dtheta=dtheta)
             tSamples[i] = t
             fieldSamples[2 * i], fieldSamples[2 * i + 1] = PhiS[0], PhiS[1]
             for c in range(8):
@@ -475,7 +522,7 @@ class Inspectre:
         return tSamples, fieldSamples, derivSamples, srcSamples
 
     def panel_nmodes_fast(self, m, n_list, r_field, theta_field, phi_field=0.0,
-                          order=16, max_levels=40):
+                          order=16, max_levels=40, dtheta=None):
         """All requested n-mode amplitudes from one panel-GL node build.
 
         Splits the radial period at the analytic closest-approach breakpoints,
@@ -486,7 +533,7 @@ class Inspectre:
         nModesrc[2]) tuples, one per entry of n_list.
         """
         self._require_c()
-        xF = self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+        xF = self._field_point(r_field, theta_field, phi_field, dtheta)
         n_max = max(abs(int(n)) for n in n_list)
         s = inspectre_c.panel_nodes_build(
             self._ctx, m, xF, self._orbpar,
@@ -501,7 +548,7 @@ class Inspectre:
             inspectre_c.panel_nodes_free(s)
 
     def fact_nmodes_fast(self, m, n_list, r_field, theta_field, phi_field=0.0,
-                         NB=None, NK=1 << 20, KG=400):
+                         NB=None, NK=1 << 20, KG=400, dtheta=None):
         """All requested n-mode amplitudes from one kernel-factorization build.
 
         Pure-C port of inspectre.factorization: samples the seven-channel
@@ -511,7 +558,7 @@ class Inspectre:
         nModesrc[2]) tuples, one per entry of n_list.
         """
         self._require_c()
-        xF = self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+        xF = self._field_point(r_field, theta_field, phi_field, dtheta)
         n_max = max(abs(int(n)) for n in n_list)
         if NB is None:
             NB = max(256, 4 * n_max)
@@ -526,13 +573,14 @@ class Inspectre:
         finally:
             inspectre_c.fact_nodes_free(s)
 
-    def fft_source_nmodes_fast(self, m, r_field, theta_field, phi_field=0.0, N=256):
+    def fft_source_nmodes_fast(self, m, r_field, theta_field, phi_field=0.0, N=256,
+                               dtheta=None):
         """C all-n source amplitudes from one FFTW transform.
 
         Returns (outRe[N], outIm[N]); bin k holds mode n = k if k<=N/2 else k-N.
         """
         self._require_c()
-        xF = self.es.make_coordinate(0.0, r_field, theta_field, phi_field)
+        xF = self._field_point(r_field, theta_field, phi_field, dtheta)
         return inspectre_c.fft_source_nmodes(
             self._ctx, m, xF, self._orbpar,
             self.spin, self.semilatus_rectum, self.eccentricity,

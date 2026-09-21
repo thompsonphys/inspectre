@@ -130,13 +130,33 @@ void generateNModeIntegrands(double t, double omegaPhi, double omegaR, int mMode
  * (1) Effective source + puncture at a field point and time
  * ========================================================================= */
 
-void inspectre_eval_at_lambda(struct effsource_equatorial_ctx *ctx, int mMode,
-                              struct coordinate *xField, double lambda,
-                              korb_params *orbpar, double a, double p, double e,
-                              double *PhiS, double *dPhiS, double *ddPhiS,
-                              double *src)
+/* Count of puncture/source evaluations since the last reset, across every path.
+   Separates evaluation count from wall time; QAG also pays a Brent inversion
+   per evaluation, which timing alone cannot distinguish from source cost. */
+static long insp_eval_hits = 0;
+void inspectre_eval_count_reset(void) { insp_eval_hits = 0; }
+long inspectre_eval_count(void) { return insp_eval_hits; }
+
+/* Evaluator swap read by inspectre_eval_at_lambda_fp, and so by every quadrature
+   that samples through it. Held as state rather than passed as an argument so the
+   integrator signatures stay put and the node geometry is provably identical
+   across the two arms of a precision comparison. */
+static int insp_eval_gold = 0;
+void inspectre_eval_precision_set(int gold) { insp_eval_gold = gold ? 1 : 0; }
+int  inspectre_eval_precision_get(void) { return insp_eval_gold; }
+
+/* Seat the effsource context on the particle at this Mino time and return the
+   field-point offsets. r_p(psi) = p/(1 + e cos psi) is re-evaluated in extended
+   precision so that dr = r_field - r_p keeps its relative accuracy when the
+   particle passes close to the field point; forming it from the double-rounded
+   absolute radii would leave dr with an absolute error ~ulp(r_p), which the
+   near-zone puncture and source amplify catastrophically. Accuracy is then
+   limited only by psi itself. */
+static void insp_seat_particle(struct effsource_equatorial_ctx *ctx,
+                               const inspectre_field_point *fp, double lambda,
+                               korb_params *orbpar, double a, double p, double e,
+                               double *drOut, double *dthetaOut)
 {
-    /* particle position from the orbit at this Mino time */
     double psi   = korb_psifromla(lambda, *orbpar);
     double r_p   = korb_rfrompsi(psi, *orbpar);
     double phi_p = korb_phifromla(lambda, *orbpar);
@@ -150,19 +170,59 @@ void inspectre_eval_at_lambda(struct effsource_equatorial_ctx *ctx, int mMode,
 
     effsource_equatorial_ctx_set_particle(ctx, &xParticle, orbpar->E, orbpar->Lz, ur);
 
-    /* Field-point offsets from the particle. r_p(psi) = p/(1 + e cos psi) is
-       re-evaluated in extended precision so that dr = r_field - r_p keeps its
-       relative accuracy when the particle passes close to the field point;
-       forming it from the double-rounded absolute radii would leave dr with an
-       absolute error ~ulp(r_p), which the near-zone puncture and source
-       amplify catastrophically. Accuracy is then limited only by psi itself. */
     const long double r_p_l = (long double)p
         / (1.0L + (long double)e * cosl((long double)psi));
-    const double dr     = (double)((long double)xField->r - r_p_l);
-    const double dtheta = xField->theta - M_PI_2;
+    *drOut     = (double)((long double)fp->r - r_p_l);
+    *dthetaOut = fp->dtheta;
+}
 
-    effsource_equatorial_ctx_calc_m_offset(ctx, mMode, dr, dtheta,
-                                           PhiS, dPhiS, ddPhiS, src);
+void inspectre_eval_at_lambda_fp(struct effsource_equatorial_ctx *ctx, int mMode,
+                              const inspectre_field_point *fp, double lambda,
+                              korb_params *orbpar, double a, double p, double e,
+                              double *PhiS, double *dPhiS, double *ddPhiS,
+                              double *src)
+{
+    double dr, dtheta;
+    insp_seat_particle(ctx, fp, lambda, orbpar, a, p, e, &dr, &dtheta);
+    insp_eval_hits++;
+
+    if (insp_eval_gold)
+    {
+        effsource_equatorial_ctx_calc_m_gold(ctx, mMode, dr, dtheta,
+                                             PhiS, dPhiS, src);
+        if (ddPhiS)
+            for (int i = 0; i < 20; i++)
+                ddPhiS[i] = 0.0;
+    }
+    else
+        effsource_equatorial_ctx_calc_m_offset(ctx, mMode, dr, dtheta,
+                                               PhiS, dPhiS, ddPhiS, src);
+}
+
+void inspectre_eval_at_lambda(struct effsource_equatorial_ctx *ctx, int mMode,
+                              struct coordinate *xField, double lambda,
+                              korb_params *orbpar, double a, double p, double e,
+                              double *PhiS, double *dPhiS, double *ddPhiS,
+                              double *src)
+{
+    const inspectre_field_point fp = { xField->r, xField->theta - M_PI_2,
+                                       xField->phi };
+    inspectre_eval_at_lambda_fp(ctx, mMode, &fp, lambda, orbpar, a, p, e,
+                                PhiS, dPhiS, ddPhiS, src);
+}
+
+void inspectre_eval_gold_at_lambda_fp(struct effsource_equatorial_ctx *ctx,
+                              int mMode,
+                              const inspectre_field_point *fp, double lambda,
+                              korb_params *orbpar, double a, double p, double e,
+                              double *PhiS, double *dPhiS, double *src)
+{
+    double dr, dtheta;
+    insp_seat_particle(ctx, fp, lambda, orbpar, a, p, e, &dr, &dtheta);
+    insp_eval_hits++;
+
+    effsource_equatorial_ctx_calc_m_gold(ctx, mMode, dr, dtheta,
+                                         PhiS, dPhiS, src);
 }
 
 /* residual t(lambda) - t_target for the root solve */
@@ -219,15 +279,27 @@ double inspectre_lambda_from_t(double t, korb_params *orbpar)
     return root;
 }
 
+void inspectre_eval_at_time_fp(struct effsource_equatorial_ctx *ctx, int mMode,
+                            const inspectre_field_point *fp, double t,
+                            korb_params *orbpar, double a, double p, double e,
+                            double *PhiS, double *dPhiS, double *ddPhiS,
+                            double *src)
+{
+    double lambda = inspectre_lambda_from_t(t, orbpar);
+    inspectre_eval_at_lambda_fp(ctx, mMode, fp, lambda, orbpar, a, p, e,
+                                PhiS, dPhiS, ddPhiS, src);
+}
+
 void inspectre_eval_at_time(struct effsource_equatorial_ctx *ctx, int mMode,
                             struct coordinate *xField, double t,
                             korb_params *orbpar, double a, double p, double e,
                             double *PhiS, double *dPhiS, double *ddPhiS,
                             double *src)
 {
-    double lambda = inspectre_lambda_from_t(t, orbpar);
-    inspectre_eval_at_lambda(ctx, mMode, xField, lambda, orbpar, a, p, e,
-                             PhiS, dPhiS, ddPhiS, src);
+    const inspectre_field_point fp = { xField->r, xField->theta - M_PI_2,
+                                       xField->phi };
+    inspectre_eval_at_time_fp(ctx, mMode, &fp, t, orbpar, a, p, e,
+                              PhiS, dPhiS, ddPhiS, src);
 }
 
 /* ===========================================================================
@@ -259,8 +331,8 @@ static void insp_nmode_components_time(double t, inspectre_nmode_params *ip,
                                        double *out)
 {
     double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
-    inspectre_eval_at_time(ip->ctx, ip->mMode, ip->xField, t, ip->orbpar,
-                           ip->a, ip->p, ip->e, PhiS, dPhiS, ddPhiS, src);
+    inspectre_eval_at_time_fp(ip->ctx, ip->mMode, ip->fp, t, ip->orbpar,
+                              ip->a, ip->p, ip->e, PhiS, dPhiS, ddPhiS, src);
 
     double nField[2], nDeriv[8], nSrc[2];
     generateNModeIntegrands(t, ip->omegaPhi, ip->omegaR, ip->mMode, ip->nMode,
@@ -294,10 +366,10 @@ static double insp_dtdlambda(double lambda, korb_params *o)
    dist, so no rField normalization is needed here (unlike the absolute stepping
    in inspectre_adaptive.c). The only scale that matters is the floor, applied
    relative to rField by the caller. */
-static double insp_distance(double rField, double theta, double rParticle)
+static double insp_distance(double rField, double dtheta, double rParticle)
 {
     double s = rParticle * rParticle + rField * rField
-             - 2.0 * rParticle * rField * sin(theta);
+             - 2.0 * rParticle * rField * cos(dtheta);
     return sqrt(s > 0.0 ? s : 0.0);
 }
 
@@ -308,8 +380,8 @@ static void insp_nmode_components_lambda(double lambda, inspectre_nmode_params *
                                          double *out)
 {
     double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
-    inspectre_eval_at_lambda(ip->ctx, ip->mMode, ip->xField, lambda, ip->orbpar,
-                             ip->a, ip->p, ip->e, PhiS, dPhiS, ddPhiS, src);
+    inspectre_eval_at_lambda_fp(ip->ctx, ip->mMode, ip->fp, lambda, ip->orbpar,
+                                ip->a, ip->p, ip->e, PhiS, dPhiS, ddPhiS, src);
 
     double t = korb_tfromla(lambda, *ip->orbpar);
     double J = insp_dtdlambda(lambda, ip->orbpar);
@@ -416,8 +488,8 @@ static void insp_quad_simpson(const double *x, const double *comp, int n,
  * Reusable Mino-time graded-mesh samples (build once, integrate per n).
  * ------------------------------------------------------------------------- */
 
-void inspectre_mino_samples_build(struct effsource_equatorial_ctx *ctx, int mMode,
-        struct coordinate *xField, korb_params *orbpar,
+void inspectre_mino_samples_build_fp(struct effsource_equatorial_ctx *ctx, int mMode,
+        const inspectre_field_point *fp, korb_params *orbpar,
         double a, double p, double e, int nSamples,
         inspectre_mino_samples *out)
 {
@@ -438,8 +510,8 @@ void inspectre_mino_samples_build(struct effsource_equatorial_ctx *ctx, int mMod
     {
         double lam  = (double)i / (double)(M - 1) * Vr;
         double r_p  = korb_rfrompsi(korb_psifromla(lam, *orbpar), *orbpar);
-        double dist = insp_distance(xField->r, xField->theta, r_p);
-        double floor = INSPECTRE_MINO_DIST_FLOOR * xField->r;  /* scale-relative clip */
+        double dist = insp_distance(fp->r, fp->dtheta, r_p);
+        double floor = INSPECTRE_MINO_DIST_FLOOR * fp->r;  /* scale-relative clip */
         if (dist < floor) dist = floor;
         double rho  = 1.0 / pow(dist, INSPECTRE_MINO_GRADE_BETA);
         preLam[i] = lam;
@@ -467,7 +539,7 @@ void inspectre_mino_samples_build(struct effsource_equatorial_ctx *ctx, int mMod
         out->lam[k] = lam;
 
         double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
-        inspectre_eval_at_lambda(ctx, mMode, xField, lam, orbpar, a, p, e,
+        inspectre_eval_at_lambda_fp(ctx, mMode, fp, lam, orbpar, a, p, e,
                                  PhiS, dPhiS, ddPhiS, src);
         out->t[k] = korb_tfromla(lam, *orbpar);
         out->J[k] = insp_dtdlambda(lam, orbpar);
@@ -483,6 +555,18 @@ void inspectre_mino_samples_build(struct effsource_equatorial_ctx *ctx, int mMod
     gsl_interp_free(inv);
     gsl_interp_accel_free(iacc);
     free(preLam); free(cum);
+}
+
+/* Absolute-coordinate form of inspectre_mino_samples_build_fp: dtheta = theta - pi/2. */
+void inspectre_mino_samples_build(struct effsource_equatorial_ctx *ctx, int mMode,
+        struct coordinate *xField, korb_params *orbpar,
+        double a, double p, double e, int nSamples,
+        inspectre_mino_samples *out)
+{
+    const inspectre_field_point fp = { xField->r, xField->theta - M_PI_2,
+                                       xField->phi };
+    inspectre_mino_samples_build_fp(ctx, mMode, &fp, orbpar, a, p, e,
+                                   nSamples, out);
 }
 
 void inspectre_mino_samples_free(inspectre_mino_samples *s)
@@ -570,10 +654,11 @@ static double insp_lambda_from_psi(double psiC, korb_params *o)
     return 0.5 * (lo + hi);
 }
 
-static double insp_panel_dist(struct coordinate *xF, korb_params *o, double lam)
+static double insp_panel_dist(const inspectre_field_point *fp, korb_params *o,
+                              double lam)
 {
     double r_p = korb_rfrompsi(korb_psifromla(lam, *o), *o);
-    return insp_distance(xF->r, xF->theta, r_p);
+    return insp_distance(fp->r, fp->dtheta, r_p);
 }
 
 /* Lambda-scale of the peak at lamC: the offset at which the field-to-particle
@@ -581,17 +666,17 @@ static double insp_panel_dist(struct coordinate *xF, korb_params *o, double lam)
    equally valid at a transversal radial crossing (linear approach) and at a
    turning point (quadratic approach). Returns 0 for an exact crossing
    (d_min = 0): the caller then refines to the maxLevels floor. */
-static double insp_peak_lambda_scale(struct coordinate *xF, korb_params *o,
-                                     double lamC)
+static double insp_peak_lambda_scale(const inspectre_field_point *fp,
+                                     korb_params *o, double lamC)
 {
     const double Vr = inspectre_radial_mino_period(o);
-    double d0 = insp_panel_dist(xF, o, lamC);
+    double d0 = insp_panel_dist(fp, o, lamC);
     if (d0 <= 0.0) return 0.0;
     double dl = 1e-9 * Vr;
     while (dl < 0.25 * Vr)
     {
-        double dp = insp_panel_dist(xF, o, lamC + dl);
-        double dm = insp_panel_dist(xF, o, lamC - dl);
+        double dp = insp_panel_dist(fp, o, lamC + dl);
+        double dm = insp_panel_dist(fp, o, lamC - dl);
         if (dp >= 2.0 * d0 || dm >= 2.0 * d0) return dl;
         dl *= 2.0;
     }
@@ -602,7 +687,7 @@ static double insp_peak_lambda_scale(struct coordinate *xF, korb_params *o,
    phase of closest approach is psi_c = arccos((p/r_f - 1)/e), giving two
    breakpoints lam1 and Vr - lam1 (outbound/inbound legs); outside the range
    the clamp lands on the nearest turning point, a single breakpoint. */
-static int insp_panel_find_peaks(struct coordinate *xF, korb_params *o,
+static int insp_panel_find_peaks(const inspectre_field_point *fp, korb_params *o,
                                  double p, double e,
                                  double lamB[2], double dlam[2])
 {
@@ -616,7 +701,7 @@ static int insp_panel_find_peaks(struct coordinate *xF, korb_params *o,
         return 1;
     }
 
-    double cosPsi = (p / xF->r - 1.0) / e;
+    double cosPsi = (p / fp->r - 1.0) / e;
     if (cosPsi >= 1.0)        { lamB[0] = 0.0;      nB = 1; }
     else if (cosPsi <= -1.0)  { lamB[0] = 0.5 * Vr; nB = 1; }
     else
@@ -628,7 +713,7 @@ static int insp_panel_find_peaks(struct coordinate *xF, korb_params *o,
     }
 
     for (int i = 0; i < nB; i++)
-        dlam[i] = insp_peak_lambda_scale(xF, o, lamB[i]);
+        dlam[i] = insp_peak_lambda_scale(fp, o, lamB[i]);
     return nB;
 }
 
@@ -654,7 +739,7 @@ static void insp_qag_component_epsabs(int minoTime, inspectre_nmode_params *ip,
                                       double *epsabsC)
 {
     double lamB[2], dlam[2];
-    int nB = insp_panel_find_peaks(ip->xField, ip->orbpar, ip->p, ip->e, lamB, dlam);
+    int nB = insp_panel_find_peaks(ip->fp, ip->orbpar, ip->p, ip->e, lamB, dlam);
     double scale[6] = { 0.0 };
     double f[12];
 
@@ -697,8 +782,8 @@ static int insp_panel_levels(double h, double dlamPeak, int maxLevels)
     return K;
 }
 
-void inspectre_panel_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
-        struct coordinate *xField, korb_params *orbpar,
+void inspectre_panel_nodes_build_fp(struct effsource_equatorial_ctx *ctx, int mMode,
+        const inspectre_field_point *fp, korb_params *orbpar,
         double a, double p, double e, int order, int maxLevels, int nMax,
         double omegaPhi, double omegaR,
         inspectre_panel_nodes *out)
@@ -710,7 +795,7 @@ void inspectre_panel_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode
     out->nNonFinite = 0;
 
     double lamB[2], dlam[2];
-    int nB = insp_panel_find_peaks(xField, orbpar, p, e, lamB, dlam);
+    int nB = insp_panel_find_peaks(fp, orbpar, p, e, lamB, dlam);
     out->nBreak = nB;
     for (int i = 0; i < nB; i++) { out->lamBreak[i] = lamB[i]; out->dlam[i] = dlam[i]; }
 
@@ -829,7 +914,7 @@ void inspectre_panel_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode
             out->J[idx]   = insp_dtdlambda(lamEval, orbpar);
 
             double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
-            inspectre_eval_at_lambda(ctx, mMode, xField, lamEval, orbpar,
+            inspectre_eval_at_lambda_fp(ctx, mMode, fp, lamEval, orbpar,
                                      a, p, e, PhiS, dPhiS, ddPhiS, src);
             out->raw[0 * N + idx] = PhiS[0];
             out->raw[1 * N + idx] = PhiS[1];
@@ -854,6 +939,19 @@ void inspectre_panel_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode
 
     gsl_integration_glfixed_table_free(tbl);
     free(pa); free(pb);
+}
+
+/* Absolute-coordinate form of inspectre_panel_nodes_build_fp: dtheta = theta - pi/2. */
+void inspectre_panel_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
+        struct coordinate *xField, korb_params *orbpar,
+        double a, double p, double e, int order, int maxLevels, int nMax,
+        double omegaPhi, double omegaR,
+        inspectre_panel_nodes *out)
+{
+    const inspectre_field_point fp = { xField->r, xField->theta - M_PI_2,
+                                       xField->phi };
+    inspectre_panel_nodes_build_fp(ctx, mMode, &fp, orbpar, a, p, e, order,
+                                  maxLevels, nMax, omegaPhi, omegaR, out);
 }
 
 void inspectre_panel_nodes_free(inspectre_panel_nodes *s)
@@ -887,9 +985,9 @@ void inspectre_panel_nodes_integrate(const inspectre_panel_nodes *s,
     insp_store_results(res, nModePhiS, nModeDPhiS, nModesrc);
 }
 
-void inspectre_integrate_nmode(int mode,
+void inspectre_integrate_nmode_fp(int mode,
         struct effsource_equatorial_ctx *ctx, int mMode, int nMode,
-        struct coordinate *xField, korb_params *orbpar,
+        const inspectre_field_point *fp, korb_params *orbpar,
         double a, double p, double e, double omegaPhi, double omegaR,
         double epsabs, double epsrel,
         double *tSamples, double *fieldSamples, double *derivSamples,
@@ -911,7 +1009,7 @@ void inspectre_integrate_nmode(int mode,
 
         inspectre_nmode_params ip;
         ip.ctx = ctx; ip.mMode = mMode; ip.nMode = nMode; ip.component = 0;
-        ip.xField = xField; ip.orbpar = orbpar;
+        ip.fp = fp; ip.orbpar = orbpar;
         ip.a = a; ip.p = p; ip.e = e;
         ip.omegaPhi = omegaPhi; ip.omegaR = omegaR;
 
@@ -954,7 +1052,7 @@ void inspectre_integrate_nmode(int mode,
 
         inspectre_nmode_params ip;
         ip.ctx = ctx; ip.mMode = mMode; ip.nMode = nMode; ip.component = 0;
-        ip.xField = xField; ip.orbpar = orbpar;
+        ip.fp = fp; ip.orbpar = orbpar;
         ip.a = a; ip.p = p; ip.e = e;
         ip.omegaPhi = omegaPhi; ip.omegaR = omegaR;
 
@@ -993,7 +1091,7 @@ void inspectre_integrate_nmode(int mode,
            Build the n-independent samples then integrate this single n; callers
            sweeping many n should build once and call _integrate per n. */
         inspectre_mino_samples s;
-        inspectre_mino_samples_build(ctx, mMode, xField, orbpar, a, p, e,
+        inspectre_mino_samples_build_fp(ctx, mMode, fp, orbpar, a, p, e,
                                      nSamples, &s);
         inspectre_mino_samples_integrate(&s, mMode, nMode, omegaPhi, omegaR,
                                          nModePhiS, nModeDPhiS, nModesrc);
@@ -1008,7 +1106,7 @@ void inspectre_integrate_nmode(int mode,
            inspectre_panel_nodes_build + _integrate directly. */
         inspectre_panel_nodes s;
         int nMax = abs(nMode) > 8 ? abs(nMode) : 8;
-        inspectre_panel_nodes_build(ctx, mMode, xField, orbpar, a, p, e,
+        inspectre_panel_nodes_build_fp(ctx, mMode, fp, orbpar, a, p, e,
                                     16, 40, nMax, omegaPhi, omegaR, &s);
         inspectre_panel_nodes_integrate(&s, mMode, nMode, omegaPhi, omegaR,
                                         nModePhiS, nModeDPhiS, nModesrc);
@@ -1024,7 +1122,7 @@ void inspectre_integrate_nmode(int mode,
         inspectre_fact_nodes s;
         int nMax = abs(nMode) > 64 ? abs(nMode) : 64;
         int NB = 4 * nMax;
-        inspectre_fact_nodes_build(ctx, mMode, xField, orbpar, a, p, e,
+        inspectre_fact_nodes_build_fp(ctx, mMode, fp, orbpar, a, p, e,
                                    NB, 1 << 20, 400, nMax, omegaPhi, omegaR, &s);
         inspectre_fact_nodes_integrate(&s, nMode,
                                        nModePhiS, nModeDPhiS, nModesrc);
@@ -1079,6 +1177,25 @@ void inspectre_integrate_nmode(int mode,
     insp_store_results(res, nModePhiS, nModeDPhiS, nModesrc);
 }
 
+/* Absolute-coordinate form of inspectre_integrate_nmode_fp: dtheta = theta - pi/2. */
+void inspectre_integrate_nmode(int mode,
+        struct effsource_equatorial_ctx *ctx, int mMode, int nMode,
+        struct coordinate *xField, korb_params *orbpar,
+        double a, double p, double e, double omegaPhi, double omegaR,
+        double epsabs, double epsrel,
+        double *tSamples, double *fieldSamples, double *derivSamples,
+        double *srcSamples, int nSamples,
+        double *nModePhiS, double *nModeDPhiS, double *nModesrc)
+{
+    const inspectre_field_point fp = { xField->r, xField->theta - M_PI_2,
+                                       xField->phi };
+    inspectre_integrate_nmode_fp(mode, ctx, mMode, nMode, &fp, orbpar,
+                                a, p, e, omegaPhi, omegaR, epsabs, epsrel,
+                                tSamples, fieldSamples, derivSamples,
+                                srcSamples, nSamples,
+                                nModePhiS, nModeDPhiS, nModesrc);
+}
+
 /* ===========================================================================
  * (3) FFT n-mode source amplitudes — all n in one transform
  *
@@ -1092,8 +1209,8 @@ void inspectre_integrate_nmode(int mode,
  * i.e. one FFTW backward transform yields every n at once. Bin k holds mode
  * n = (k <= N/2) ? k : k - N; for a requested n use bin ((n % N) + N) % N.
  * ========================================================================= */
-void inspectre_fft_source_nmodes(struct effsource_equatorial_ctx *ctx, int mMode,
-        struct coordinate *xField, korb_params *orbpar,
+void inspectre_fft_source_nmodes_fp(struct effsource_equatorial_ctx *ctx, int mMode,
+        const inspectre_field_point *fp, korb_params *orbpar,
         double a, double p, double e, double omegaPhi, double omegaR,
         int N, double *outRe, double *outIm)
 {
@@ -1119,7 +1236,7 @@ void inspectre_fft_source_nmodes(struct effsource_equatorial_ctx *ctx, int mMode
         double t   = (double)j / (double)N * Tr;          /* [0, Tr), periodic */
         double lam = gsl_spline_eval(sp, t, acc);
         double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
-        inspectre_eval_at_lambda(ctx, mMode, xField, lam, orbpar, a, p, e,
+        inspectre_eval_at_lambda_fp(ctx, mMode, fp, lam, orbpar, a, p, e,
                                  PhiS, dPhiS, ddPhiS, src);
         /* apply only the m-carrier; the FFT supplies exp(i n wr t) for every n */
         in[j][0] = frequencyShiftReal(t, omegaPhi, omegaR, src[0], src[1], mMode, 0);
@@ -1141,6 +1258,18 @@ void inspectre_fft_source_nmodes(struct effsource_equatorial_ctx *ctx, int mMode
     gsl_interp_accel_free(acc);
     free(latT);
     free(latL);
+}
+
+/* Absolute-coordinate form of inspectre_fft_source_nmodes_fp: dtheta = theta - pi/2. */
+void inspectre_fft_source_nmodes(struct effsource_equatorial_ctx *ctx, int mMode,
+        struct coordinate *xField, korb_params *orbpar,
+        double a, double p, double e, double omegaPhi, double omegaR,
+        int N, double *outRe, double *outIm)
+{
+    const inspectre_field_point fp = { xField->r, xField->theta - M_PI_2,
+                                       xField->phi };
+    inspectre_fft_source_nmodes_fp(ctx, mMode, &fp, orbpar, a, p, e,
+                                  omegaPhi, omegaR, N, outRe, outIm);
 }
 
 /* ===========================================================================
@@ -1186,8 +1315,8 @@ static void insp_fact_resample(const double *x, int NB, int NK,
     for (int k = 0; k < NK; k++) xd[k] = outNK[k][0] / (double)NB;
 }
 
-void inspectre_fact_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
-        struct coordinate *xField, korb_params *orbpar,
+void inspectre_fact_nodes_build_fp(struct effsource_equatorial_ctx *ctx, int mMode,
+        const inspectre_field_point *fp, korb_params *orbpar,
         double a, double p, double e, int NB, int NK, int KG, int nMax,
         double omegaPhi, double omegaR,
         inspectre_fact_nodes *out)
@@ -1218,10 +1347,10 @@ void inspectre_fact_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
     /* ---- sample the split channels + orbit series on the base grid ---- */
     double *g   = malloc((size_t)2 * INSP_FACT_NCH * INSP_FACT_NCOMP * NB
                          * sizeof(double));
-    double *rP  = malloc((size_t)NB * sizeof(double));
+    double *drP = malloc((size_t)NB * sizeof(double));
     double *a20 = malloc((size_t)NB * sizeof(double));
     double *a02 = malloc((size_t)NB * sizeof(double));
-    const double dth = xField->theta - M_PI_2;
+    const double dth = fp->dtheta;
 
     for (int j = 0; j < NB; j++)
     {
@@ -1238,11 +1367,16 @@ void inspectre_fact_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
         effsource_equatorial_ctx_set_particle(ctx, &xParticle,
                                               orbpar->E, orbpar->Lz, ur);
 
+        const long double r_p_l = (long double)p
+            / (1.0L + (long double)e * cosl((long double)psi));
+        const double dr = (double)((long double)fp->r - r_p_l);
+
+        insp_eval_hits++;
         double PhiS_s[14], dPhiS_s[56], d2PhiS_s[140], src_s[14], al[4];
-        effsource_equatorial_ctx_calc_m_split(ctx, mMode, xField->r - r_p, dth,
+        effsource_equatorial_ctx_calc_m_split(ctx, mMode, dr, dth,
                                               PhiS_s, dPhiS_s, d2PhiS_s, src_s);
         effsource_equatorial_ctx_get_alpha(ctx, al);
-        rP[j] = r_p; a20[j] = al[0]; a02[j] = al[1];
+        drP[j] = dr; a20[j] = al[0]; a02[j] = al[1];
 
         /* fold exp(i m wphi t): cancels the secular phase so every channel
            series is Tr-periodic (same role as the m-carrier in the panel /
@@ -1299,22 +1433,21 @@ void inspectre_fact_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
 
     double *alphaD = malloc((size_t)NK * sizeof(double));
     double *tmpD   = malloc((size_t)NK * sizeof(double));
-    /* alpha_d = a20_d (r_f - r_p_d)^2 + a02_d dth^2, accumulated so only two
-       dense scratch arrays are alive at once */
-    insp_fact_resample(rP, NB, NK, planF_NB, inNB, outNB,
+    /* alpha_d = a20_d dr_d^2 + a02_d dth^2, accumulated so only two dense
+       scratch arrays are alive at once. dr is resampled directly rather than
+       resampling r_p and subtracting r_f: the resample is linear, so the two
+       agree exactly in arithmetic, but interpolating the small quantity keeps
+       dr's relative accuracy instead of rounding it through r_p's magnitude. */
+    insp_fact_resample(drP, NB, NK, planF_NB, inNB, outNB,
                        planB_NK, inNK, outNK, tmpD);
-    for (int k = 0; k < NK; k++)
-    {
-        double dr = xField->r - tmpD[k];
-        alphaD[k] = dr * dr;
-    }
+    for (int k = 0; k < NK; k++) alphaD[k] = tmpD[k] * tmpD[k];
     insp_fact_resample(a20, NB, NK, planF_NB, inNB, outNB,
                        planB_NK, inNK, outNK, tmpD);
     for (int k = 0; k < NK; k++) alphaD[k] *= tmpD[k];
     insp_fact_resample(a02, NB, NK, planF_NB, inNB, outNB,
                        planB_NK, inNK, outNK, tmpD);
     for (int k = 0; k < NK; k++) alphaD[k] += tmpD[k] * dth * dth;
-    free(rP); free(a20); free(a02);
+    free(drP); free(a20); free(a02);
 
     /* ---- kernel FFTs, trimmed to |j| <= nKmax ---- */
     double *invD = tmpD;                          /* reuse as 1/alpha scratch */
@@ -1350,6 +1483,19 @@ void inspectre_fact_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
     fftw_free(inNK); fftw_free(outNK);
 }
 
+/* Absolute-coordinate form of inspectre_fact_nodes_build_fp: dtheta = theta - pi/2. */
+void inspectre_fact_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
+        struct coordinate *xField, korb_params *orbpar,
+        double a, double p, double e, int NB, int NK, int KG, int nMax,
+        double omegaPhi, double omegaR,
+        inspectre_fact_nodes *out)
+{
+    const inspectre_field_point fp = { xField->r, xField->theta - M_PI_2,
+                                       xField->phi };
+    inspectre_fact_nodes_build_fp(ctx, mMode, &fp, orbpar, a, p, e, NB, NK,
+                                 KG, nMax, omegaPhi, omegaR, out);
+}
+
 void inspectre_fact_nodes_free(inspectre_fact_nodes *s)
 {
     free(s->chat); free(s->khat);
@@ -1364,12 +1510,24 @@ void inspectre_fact_nodes_integrate(const inspectre_fact_nodes *s, int nMode,
     const size_t kW = 2 * (size_t)nKmax + 1;
     double res[12] = { 0.0 };
 
+    /* The accumulators are long double because this sum cancels hard. The
+       channels carry the same mutual cancellation in Fourier space that they do
+       pointwise: measured sum|term| / |result| for src is 2.6e9 at n = 0,
+       2.1e10 at n = 8 and 1.7e12 at n = 32 over ~1500 terms, so a double
+       accumulator loses 4.8e-08, 4.8e-07 and 5.9e-05 respectively. PhiS
+       cancels only by ~5 and is unaffected either way.
+
+       This fixes the accumulation, not the inputs: chat and khat are FFTW
+       outputs and so are double to begin with, which leaves a floor of order
+       cond * DBL_EPSILON that only long-double transforms (fftw3l) would
+       remove. */
     for (int c = 0; c < INSP_FACT_NCOMP; c++)
     {
         /* A channel: direct read of the base-grid FFT bin */
         size_t oA = 2 * ((size_t)(0 * INSP_FACT_NCOMP + c) * NB
                          + insp_fact_wrap(nMode, NB));
-        double xr = s->chat[oA], xi = s->chat[oA + 1];
+        long double xr = (long double)s->chat[oA];
+        long double xi = (long double)s->chat[oA + 1];
 
         /* L, P1..P5: convolution against the trimmed kernel coefficients */
         for (int ch = 1; ch < INSP_FACT_NCH; ch++)
@@ -1382,16 +1540,18 @@ void inspectre_fact_nodes_integrate(const inspectre_fact_nodes *s, int nMode,
                 size_t oc = 2 * ((size_t)(ch * INSP_FACT_NCOMP + c) * NB
                                  + insp_fact_wrap(k, NB));
                 size_t ok = 2 * ((size_t)kq * kW + (size_t)(j + nKmax));
-                double cr = s->chat[oc],     ci = s->chat[oc + 1];
-                double kr = s->khat[ok],     ki = s->khat[ok + 1];
+                long double cr = (long double)s->chat[oc];
+                long double ci = (long double)s->chat[oc + 1];
+                long double kr = (long double)s->khat[ok];
+                long double ki = (long double)s->khat[ok + 1];
                 xr += cr * kr - ci * ki;
                 xi += cr * ki + ci * kr;
             }
         }
 
-        if (c == 0)      { res[0] = xr;              res[1] = xi; }
-        else if (c < 5)  { res[2 * c] = xr;          res[2 * c + 1] = xi; }
-        else             { res[10] = xr;             res[11] = xi; }
+        if (c == 0)      { res[0] = (double)xr;         res[1] = (double)xi; }
+        else if (c < 5)  { res[2 * c] = (double)xr;     res[2 * c + 1] = (double)xi; }
+        else             { res[10] = (double)xr;        res[11] = (double)xi; }
     }
 
     insp_store_results(res, nModePhiS, nModeDPhiS, nModesrc);

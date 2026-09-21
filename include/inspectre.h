@@ -45,7 +45,31 @@ void generateNModeIntegrands(double t, double omegaPhi, double omegaR,
  * only supplies a field point and a time. Uses the equatorial context API.
  * ------------------------------------------------------------------------- */
 
+/* Field point carrying the polar offset directly.
+
+   dtheta = theta - pi/2 is the only way theta ever enters, and routing it
+   through an absolute theta caps its relative accuracy at 1.1e-16/dtheta
+   (6e-9 at dtheta = 1e-8). Since the kernel is
+   alpha = alpha20 dr^2 + alpha02 dtheta^2, the dtheta term floors alpha, so dr
+   need never be resolved below ~dtheta and the long-double dr formed internally
+   suffices -- but nothing floors dtheta itself, and an error in it is
+   systematic across the whole orbit. Hence dtheta is supplied, not derived.
+
+   phi is currently read by no routine; kept for symmetry. */
+typedef struct {
+    double r;
+    double dtheta;
+    double phi;
+} inspectre_field_point;
+
 /* Primary: parameterized by Mino time lambda. */
+void inspectre_eval_at_lambda_fp(struct effsource_equatorial_ctx *ctx, int mMode,
+                              const inspectre_field_point *fp, double lambda,
+                              korb_params *orbpar, double a, double p, double e,
+                              double *PhiS, double *dPhiS, double *ddPhiS,
+                              double *src);
+
+/* As _fp, taking an absolute-coordinate field point (dtheta = theta - pi/2). */
 void inspectre_eval_at_lambda(struct effsource_equatorial_ctx *ctx, int mMode,
                               struct coordinate *xField, double lambda,
                               korb_params *orbpar, double a, double p, double e,
@@ -56,11 +80,45 @@ void inspectre_eval_at_lambda(struct effsource_equatorial_ctx *ctx, int mMode,
 double inspectre_lambda_from_t(double t, korb_params *orbpar);
 
 /* Wrapper: parameterized by coordinate time t (root-solves lambda(t)). */
+void inspectre_eval_at_time_fp(struct effsource_equatorial_ctx *ctx, int mMode,
+                            const inspectre_field_point *fp, double t,
+                            korb_params *orbpar, double a, double p, double e,
+                            double *PhiS, double *dPhiS, double *ddPhiS,
+                            double *src);
+
 void inspectre_eval_at_time(struct effsource_equatorial_ctx *ctx, int mMode,
                             struct coordinate *xField, double t,
                             korb_params *orbpar, double a, double p, double e,
                             double *PhiS, double *dPhiS, double *ddPhiS,
                             double *src);
+
+/* Reference evaluator: the seven analytic kernel channels of calc_m_split
+   reassembled in long double, with the P1/alpha + P2/alpha^2 pair fused as
+   (P1 alpha + P2)/alpha^2 so their ~3.6e6 mutual cancellation is paid once at
+   extended precision. Same outputs as _eval_at_lambda_fp minus ddPhiS, which
+   calc_m leaves partly NAN. Slower; for grading the double path, not for
+   production. */
+void inspectre_eval_gold_at_lambda_fp(struct effsource_equatorial_ctx *ctx,
+                              int mMode,
+                              const inspectre_field_point *fp, double lambda,
+                              korb_params *orbpar, double a, double p, double e,
+                              double *PhiS, double *dPhiS, double *src);
+
+/* Source-evaluation counter. Incremented once per puncture/source evaluation by
+   every path (adaptive, node builds, gold). Reset before a batch, read after, to
+   separate evaluation count from wall time -- QAG additionally pays a Brent
+   inversion per evaluation, which timing alone conflates with cost. */
+void inspectre_eval_count_reset(void);
+long inspectre_eval_count(void);
+
+/* Evaluator selected by inspectre_eval_at_lambda_fp, hence by every quadrature
+   that samples through it: 0 = calc_m_offset (double), 1 = calc_m_gold
+   (long-double channel reassembly). Set around a batch to swap the evaluator
+   without changing the quadrature, so a double-vs-extended comparison holds the
+   node set fixed. Gold yields no second derivatives, so ddPhiS is zeroed.
+   INSPECTRE_INTEG_FACT_CONV reads calc_m_split directly and is unaffected. */
+void inspectre_eval_precision_set(int gold);
+int  inspectre_eval_precision_get(void);
 
 /* ---------------------------------------------------------------------------
  * (2) n-mode Fourier amplitude integration over one radial period.
@@ -72,7 +130,7 @@ void inspectre_eval_at_time(struct effsource_equatorial_ctx *ctx, int mMode,
 typedef struct {
     struct effsource_equatorial_ctx *ctx;
     int    mMode, nMode, component;
-    struct coordinate *xField;
+    const inspectre_field_point *fp;
     korb_params *orbpar;
     double a, p, e, omegaPhi, omegaR;
 } inspectre_nmode_params;
@@ -112,6 +170,15 @@ enum { INSPECTRE_INTEG_QAG        = 0,
    Both QAG modes raise `epsabs` per component to the roundoff level the
    integrand carries; a component whose exact integral vanishes cannot be
    certified below that, and asking for less makes QAG bisect to its limit. */
+void inspectre_integrate_nmode_fp(int mode,
+        struct effsource_equatorial_ctx *ctx, int mMode, int nMode,
+        const inspectre_field_point *fp, korb_params *orbpar,
+        double a, double p, double e, double omegaPhi, double omegaR,
+        double epsabs, double epsrel,
+        double *tSamples, double *fieldSamples, double *derivSamples,
+        double *srcSamples, int nSamples,
+        double *nModePhiS, double *nModeDPhiS, double *nModesrc);
+
 void inspectre_integrate_nmode(int mode,
         struct effsource_equatorial_ctx *ctx, int mMode, int nMode,
         struct coordinate *xField, korb_params *orbpar,
@@ -152,6 +219,11 @@ typedef struct {
 
 /* Build the graded mesh + raw source samples (the only source-evaluating step).
    Caller frees with inspectre_mino_samples_free. */
+void inspectre_mino_samples_build_fp(struct effsource_equatorial_ctx *ctx, int mMode,
+        const inspectre_field_point *fp, korb_params *orbpar,
+        double a, double p, double e, int nSamples,
+        inspectre_mino_samples *out);
+
 void inspectre_mino_samples_build(struct effsource_equatorial_ctx *ctx, int mMode,
         struct coordinate *xField, korb_params *orbpar,
         double a, double p, double e, int nSamples,
@@ -221,6 +293,12 @@ typedef struct {
    resolution bound for the oscillatory carrier -- integrating beyond nMax
    with these nodes silently degrades. Caller frees with
    inspectre_panel_nodes_free. */
+void inspectre_panel_nodes_build_fp(struct effsource_equatorial_ctx *ctx, int mMode,
+        const inspectre_field_point *fp, korb_params *orbpar,
+        double a, double p, double e, int order, int maxLevels, int nMax,
+        double omegaPhi, double omegaR,
+        inspectre_panel_nodes *out);
+
 void inspectre_panel_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
         struct coordinate *xField, korb_params *orbpar,
         double a, double p, double e, int order, int maxLevels, int nMax,
@@ -276,6 +354,12 @@ typedef struct {
    NK is rounded up so that nMax + KG kernel coefficients exist; defaults that
    reproduce the validated Python workflow are NB = 4*nMax, NK = 1<<20,
    KG = 400. Caller frees with inspectre_fact_nodes_free. */
+void inspectre_fact_nodes_build_fp(struct effsource_equatorial_ctx *ctx, int mMode,
+        const inspectre_field_point *fp, korb_params *orbpar,
+        double a, double p, double e, int NB, int NK, int KG, int nMax,
+        double omegaPhi, double omegaR,
+        inspectre_fact_nodes *out);
+
 void inspectre_fact_nodes_build(struct effsource_equatorial_ctx *ctx, int mMode,
         struct coordinate *xField, korb_params *orbpar,
         double a, double p, double e, int NB, int NK, int KG, int nMax,
@@ -295,6 +379,11 @@ void inspectre_fact_nodes_integrate(const inspectre_fact_nodes *s, int nMode,
    periodic t-grid of N points yields the complex amplitude A_n for every n at
    once. outRe[k]/outIm[k] (length N) hold mode n = (k <= N/2) ? k : k - N; for a
    requested n read bin ((n % N) + N) % N. Requires |n| <= N/2 to be resolved. */
+void inspectre_fft_source_nmodes_fp(struct effsource_equatorial_ctx *ctx, int mMode,
+        const inspectre_field_point *fp, korb_params *orbpar,
+        double a, double p, double e, double omegaPhi, double omegaR,
+        int N, double *outRe, double *outIm);
+
 void inspectre_fft_source_nmodes(struct effsource_equatorial_ctx *ctx, int mMode,
         struct coordinate *xField, korb_params *orbpar,
         double a, double p, double e, double omegaPhi, double omegaR,
