@@ -219,6 +219,70 @@ class EffectiveSource:
 
         return PhiS_m
 
+    def phi_s_m_offset(self, m, dr, dtheta, branch="auto"):
+        """Compute the m-mode puncture at an offset from the particle.
+
+        Parameters
+        ----------
+        m : int
+            Azimuthal mode number. The "ei_table" branch caps at m = 20;
+            "legendre" has no ceiling.
+        dr, dtheta : float
+            Field point offset from the particle (r - r_p, theta - theta_p).
+        branch : str
+            "auto", "ei_table" or "legendre". "auto" picks "legendre" once
+            C1 = alpha/beta exceeds 0.5 m^-1.2, the median crossing of the two
+            branches' error curves.
+
+        Returns
+        -------
+        (Re, Im, branch_used)
+        """
+        if self.orbit != "equatorial" or self.impl != "refactored":
+            raise NotImplementedError(
+                f"phi_s_m_offset needs orbit='equatorial', impl='refactored'; "
+                f"got orbit={self.orbit!r}, impl={self.impl!r}."
+            )
+        from .mmode import phi_s_m
+
+        return phi_s_m(self._ef, m, dr, dtheta, branch=branch)
+
+    def calc_m_offset(self, m, dr, dtheta, branch="auto"):
+        """Compute the m-mode puncture, derivatives and source at an offset.
+
+        Parameters
+        ----------
+        m : int
+            Azimuthal mode number. The "ei_table" branch caps at m = 20.
+        dr, dtheta : float
+            Field point offset from the particle (r - r_p, theta - theta_p).
+        branch : str
+            "auto", "ei_table" or "legendre". "auto" picks "legendre" once
+            C1 = alpha/beta exceeds 0.45 m^-1.1, the median crossing of the two
+            branches' error curves.
+
+        Returns
+        -------
+        dict with keys PhiS (2,), dPhiS (4, 2), d2PhiS (10, 2), src (2,),
+        branch (str). Mixed second derivatives are NAN, as in the C.
+        """
+        if self.orbit != "equatorial" or self.impl != "refactored":
+            raise NotImplementedError(
+                f"calc_m_offset needs orbit='equatorial', impl='refactored'; "
+                f"got orbit={self.orbit!r}, impl={self.impl!r}."
+            )
+        from .mmode import calc_m
+
+        PhiS, dPhiS, d2PhiS, src, used = calc_m(self._ef, m, dr, dtheta,
+                                                branch=branch)
+        return {
+            "PhiS": np.array(PhiS),
+            "dPhiS": np.array(dPhiS).reshape(4, 2),
+            "d2PhiS": np.array(d2PhiS).reshape(10, 2),
+            "src": np.array(src),
+            "branch": used,
+        }
+
     def source(self, r_field, theta_field, phi_field):
         """Compute the effective source at a field point.
 
