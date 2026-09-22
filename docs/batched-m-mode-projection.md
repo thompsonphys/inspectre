@@ -84,12 +84,15 @@ over the radial period.
 
 ## C surface
 
-    void effsource_equatorial_ctx_src_m_sweep(
+    void effsource_equatorial_ctx_sweep(
         struct effsource_equatorial_ctx *ctx,
-        double dr, double dtheta, int nphi, double *src_out);
+        double dr, double dtheta, int nphi,
+        double *src_out, double *dPhiS_out, double *d2PhiS_out);
 
-`src_out[nphi]` receives `src` at `dphi_k = 2 pi k / nphi`. The caller owns the FFT;
-FFTW is already linked by both inspectre and SpECTRE.
+`src_out[nphi]` receives `src` at `dphi_k = 2 pi k / nphi`; the derivative arrays are
+interleaved by component and may be NULL when not wanted, since the elliptic solver
+needs them only on the worldtube boundary. The caller owns the FFT; FFTW is already
+linked by both inspectre and SpECTRE.
 
 Nothing else is added. `calc_offset` stays as the unbatched path and the reference the
 sweep is graded against.
@@ -130,13 +133,28 @@ uniform in n.
 
 ## Limits
 
-- **`PhiS` keeps the analytic path.** Through the projection it degrades to 1.27e-06
-  at m=20, C1=0.6: `s2^(-7/2)` is smoother than `s2^(-11/2)`, so its modes sit further
-  below the peak and `kappa_quad` is larger. The analytic path has kappa = 1.
-- **A ceiling at `m sqrt(C1) > 8.5`**, where `kappa_quad ~ r^(-m)` with
-  `r = z - sqrt(z^2-1)`, `z = 1 + 2 C1`. It does not bite at m <= 20 (worst 4.2e-09 at
-  the C1=0.6 corner) but would above m ~ 25. The `legendre` branch is accurate exactly
-  there, so it is the fallback if the mode cap rises.
+- **A ceiling in `m sqrt(C1)`**, from `kappa_quad ~ r^(-m)` with
+  `r = z - sqrt(z^2-1)`, `z = 1 + 2 C1`. It applies to every component alike, `src`,
+  the derivatives and `PhiS`:
+
+  | `m sqrt(C1)` | error, all components |
+  |---|---|
+  | 5.5 - 7.7 | 1e-14 to 1e-13 |
+  | 11.0 | ~3e-10 |
+  | 13.4 - 15.5 | 1e-8 to 8e-8 |
+  | 16.4 - 23.2 | 4e-4 to 1e-2 |
+
+  So `m sqrt(C1) < 12` holds the error under ~1e-9, and the method collapses past ~16.
+  At the mode cap m = 20 this permits C1 < 0.36; the worldtube reaches C1 = 0.6, where
+  m = 20 still gives ~8e-8. The `legendre` branch is accurate exactly where the
+  projection is not, so it is the fallback if the cap rises above ~25.
+
+  (An earlier draft quoted 8.5. That is where the projection's error *equals* the
+  legendre branch's, which is a crossover, not a usability limit.)
+- **`PhiS` keeps the analytic path.** It is the worst component under the projection --
+  8e-8 at m=20, C1=0.6, because `s2^(-7/2)` is smoother than `s2^(-11/2)` so its modes
+  sit further below the peak. That is usable, but the analytic path gives 1e-16 at
+  kappa = 1 for free, so there is no reason to move it.
 - Deep near zone costs nodes: N* = 81566 at the worldtube minimum C1 = 2.06e-7, one
   point in 61500. Accuracy is fine there; only the node count grows.
 
@@ -167,6 +185,8 @@ SpECTRE is out of scope until this is proven in inspectre.
 - Degree `d` of the combined block polynomials is estimated at ~14 from the Laurent
   index range; the port fixes it exactly. Cost scales mildly: 2.2 ns at d=4, 4.6 at
   d=14, 6.6 at d=20.
-- Whether the sweep should also return `dPhiS`, which the elliptic solver needs at the
-  worldtube boundary. Not measured; the projection's conditioning for derivatives is
-  unknown and may differ from both `src` and `PhiS`.
+- ~~Whether the sweep should also return `dPhiS`.~~ **Resolved 2026-09-22.** Measured
+  across C1 = 0.01 to 0.6 at m = 2, 10, 20: every first and second derivative projects
+  at 1e-16 to 4e-10, better than `src` itself. They sit between `src` and `PhiS` in
+  smoothness, as the pole order predicts. The sweep should return `src` and the
+  derivatives; only `PhiS` stays analytic.
