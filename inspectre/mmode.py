@@ -44,7 +44,7 @@ from scipy.special import ellipe, ellipk
 
 from .mmode_laurent import numerators, src_numerator
 
-BRANCHES = ("auto", "ei_table", "legendre")
+BRANCHES = ("auto", "ei_table", "legendre", "projection")
 EI_TABLE_MMAX = 20
 SWITCH_C1_COEFF = 0.5
 SWITCH_C1_SRC_COEFF = 0.45
@@ -53,6 +53,9 @@ SWITCH_C1_EXP = 1.2
 GUARD_DIGITS = 40.0
 GUARD_MIN = 20
 GUARD_MAX = 300000
+PROJ_RESOLVE = 37.0
+PROJ_NYQUIST = 1.4
+PROJ_MIN_NODES = 64
 
 _LAURENT_DQ2 = {-1: -0.25, 0: 0.5, 1: -0.25}
 _LAURENT_SIN = {-1: 0.5j, 1: -0.5j}
@@ -249,6 +252,47 @@ def choose_branch_src(ctx, m, dr, dtheta):
     return "legendre" if alpha / ctx.beta > switch_c1_src(m) else "ei_table"
 
 
+def projection_nodes(C1, m):
+    """(C1, m) -> phi nodes for a projection sweep, rounded up to a power of two.
+
+    The trapezoid rule on src(phi) converges like exp(-2 N sqrt(C1)), set by the
+    singularity at dphib = +-2i asinh sqrt(alpha/beta); the second term is Nyquist.
+    """
+    want = max(PROJ_MIN_NODES, PROJ_RESOLVE / math.sqrt(C1), PROJ_NYQUIST * m)
+    return 1 << max(6, int(math.ceil(math.log2(want))))
+
+
+def calc_m_projection(ctx_obj, ms, dr, dtheta, nodes=None):
+    """(EffsourceEquatorialContext, m list, dr, dtheta) -> {m: (PhiS, dPhiS, d2PhiS, src)}.
+
+    One sweep of the pointwise evaluator in the field-point azimuth serves every m
+    at once. Accurate while m sqrt(C1) < 12; above that the modes fall too far below
+    the peak to be resolved in double.
+    """
+    ctx = ctx_obj._ctx
+    ms = [int(m) for m in ms]
+    C1 = (ctx.alpha20 * dr * dr + ctx.alpha02 * dtheta * dtheta) / ctx.beta
+    if C1 <= 0.0:
+        raise ValueError("projection needs a field point off the particle")
+    N = nodes or projection_nodes(C1, max(ms))
+    psi = 2.0 * math.pi * np.arange(N) / N
+    raw = [ctx_obj.calc_offset(dr, dtheta, float(x)) for x in psi]
+    cols = ([np.array([r[0] for r in raw])]
+            + [np.array([r[1][i] for r in raw]) for i in range(4)]
+            + [np.array([r[2][i] for r in raw]) for i in range(10)]
+            + [np.array([r[3] for r in raw])])
+    spec = [np.fft.fft(c) / N for c in cols]
+    out = {}
+    for m in ms:
+        rot = 2.0 * math.pi * np.exp(-1j * m * ctx.xp.phi)
+        v = [sp[m % N] * rot for sp in spec]
+        out[m] = ([v[0].real, v[0].imag],
+                  [x for k in range(1, 5) for x in (v[k].real, v[k].imag)],
+                  [x for k in range(5, 15) for x in (v[k].real, v[k].imag)],
+                  [v[15].real, v[15].imag])
+    return out
+
+
 def calc_m(ctx_obj, m, dr, dtheta, branch="auto"):
     """(EffsourceEquatorialContext, m, dr, dtheta, branch) -> (PhiS, dPhiS, d2PhiS, src, branch)."""
     if branch not in BRANCHES:
@@ -259,6 +303,8 @@ def calc_m(ctx_obj, m, dr, dtheta, branch="auto"):
         if m > EI_TABLE_MMAX:
             raise ValueError(f"branch='ei_table' supports m <= {EI_TABLE_MMAX}, got {m}")
         out = calc_m_ei_table(ctx_obj, m, dr, dtheta)
+    elif used == "projection":
+        out = calc_m_projection(ctx_obj, [m], dr, dtheta)[m]
     else:
         out = calc_m_legendre(ctx, m, dr, dtheta)
     return out + (used,)
