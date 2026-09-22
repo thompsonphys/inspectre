@@ -346,9 +346,8 @@ def numerators(ctx, dr, dtheta, N=Std):
     return num, s2
 
 
-def src_numerator(ctx, dr, dtheta, N=Std):
-    """(ctx, dr, dtheta) -> (Laurent numerator of src over s2^(11/2), s2 Laurent)."""
-    num, s2 = numerators(ctx, dr, dtheta, N)
+def src_weights(ctx, dr, dtheta, N=Std):
+    """(ctx, dr, dtheta) -> ({component: weight}, denominator) of the wave operator."""
     r = N.mpf(ctx.xp.r) + N.mpf(dr)
     theta = N.mpf(ctx.xp.theta) + N.mpf(dtheta)
     a = N.mpf(ctx.a)
@@ -373,8 +372,20 @@ def src_numerator(ctx, dr, dtheta, N=Std):
         "dth": (-a2 * sin2th + 2 * r * sin2th - r2 * sin2th),
     }
     denom = sinth2 * (a2 + (-2 + r) * r) * (a2 + 2 * r2 + a2 * cos2th)
+    return w, denom
+
+
+def src_contract(num, w, denom):
+    """({component: Laurent}, weights, denominator) -> Laurent numerator of src."""
     total = {}
     for key, cf in w.items():
         if cf != 0:
             total = ladd(total, lscale(num[key], cf))
-    return lscale(total, -1 / denom), s2
+    return lscale(total, -1 / denom)
+
+
+def src_numerator(ctx, dr, dtheta, N=Std):
+    """(ctx, dr, dtheta) -> (Laurent numerator of src over s2^(11/2), s2 Laurent)."""
+    num, s2 = numerators(ctx, dr, dtheta, N)
+    w, denom = src_weights(ctx, dr, dtheta, N)
+    return src_contract(num, w, denom), s2
