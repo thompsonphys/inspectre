@@ -230,9 +230,7 @@ class EffectiveSource:
         dr, dtheta : float
             Field point offset from the particle (r - r_p, theta - theta_p).
         branch : str
-            "auto", "ei_table" or "legendre". "auto" picks "legendre" once
-            C1 = alpha/beta exceeds 0.5 m^-1.2, the median crossing of the two
-            branches' error curves.
+            "auto", "ei_table" or "legendre".
 
         Returns
         -------
@@ -257,9 +255,7 @@ class EffectiveSource:
         dr, dtheta : float
             Field point offset from the particle (r - r_p, theta - theta_p).
         branch : str
-            "auto", "ei_table" or "legendre". "auto" picks "legendre" once
-            C1 = alpha/beta exceeds 0.45 m^-1.1, the median crossing of the two
-            branches' error curves.
+            "auto", "ei_table", "legendre" or "projection".
 
         Returns
         -------

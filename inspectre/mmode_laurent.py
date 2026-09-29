@@ -1,16 +1,12 @@
-"""Laurent representation of the puncture and effective source in exp(i dphib/2).
+"""Laurent representation of the puncture and effective source in u = exp(i dphib/2).
 
-Every component of (PhiS, dPhiS, d2PhiS, src) that effsource_equatorial_ctx_calc
-produces has the form
+Every component of (PhiS, dPhiS, d2PhiS, src) that
+effsource_equatorial_ctx_calc produces has the form
 
     X = T_X(dphib) / s2^p,   s2 = alpha + beta sin^2(dphib/2),   p in {7/2, 9/2, 11/2}
 
-with T_X a trigonometric polynomial. Writing u = exp(i dphib/2) makes every
-factor the C uses a Laurent polynomial in u, including the half-angle ones
-(dQ = sin(dphib/2), dQ_dph = cos(dphib/2)/2): odd powers of dQ only ever appear
-against a dQ_dph, so the result carries even powers of u alone.
-
-Placing all components over the common denominator s2^(11/2) gives the m-mode as
+with T_X a trigonometric polynomial, and is a Laurent polynomial in u carrying
+even powers alone. Over the common denominator s2^(11/2),
 
     X_m = sum_n T_n S^(11/2)_|m-n| * exp(-i m (phi_p + c dr))
 
@@ -20,13 +16,15 @@ A and its Q, R derivatives follow from the two blocks
 
     A = sum_j ReA[j] dQ^2j + dR sum_j ImA[j] dQ^2j
 
-so no derivative of A needs its own transcription: the r and theta derivatives
-are the same block polynomial carried through second-order jets in (dr, dtheta),
-and the t derivatives are the same block polynomial over the ctx dAdt#### and
-d2Adt2#### coefficient sets.
+carried through second-order jets in (dr, dtheta) for the r and theta
+derivatives, and over the ctx dAdt#### and d2Adt2#### coefficient sets for the t
+derivatives.
 """
 
 import math
+
+import numpy as np
+
 
 class Std:
     """Double-precision numeric context."""
@@ -35,6 +33,16 @@ class Std:
     mpf = float
     sin = staticmethod(math.sin)
     cos = staticmethod(math.cos)
+
+
+class Ld:
+    """Long-double numeric context, 64-bit mantissa on x86."""
+
+    mpc = staticmethod(lambda re, im=0.0:
+                       np.clongdouble(re) + np.clongdouble(im) * np.clongdouble(1j))
+    mpf = staticmethod(np.longdouble)
+    sin = staticmethod(np.sin)
+    cos = staticmethod(np.cos)
 
 
 def bases(N):
