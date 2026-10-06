@@ -24,6 +24,7 @@ int main(int argc, char *argv[])
 
     korb_params orbpar;
     korb_getparams(eccentric, inclined, a, p, e, x, 1.0e-15, &orbpar);
+    inspectre_orbit_circular_fix(&orbpar);
 
     struct effsource_equatorial_ctx *ctx = effsource_equatorial_create(1.0, a);
 

@@ -68,6 +68,7 @@ int main(int argc, char *argv[])
 
     /* All orbital characteristics are calculated and stored inside "orbpar" */
     korb_getparams(eccentric, inclined, a, p, e, x, err, &orbpar);
+    inspectre_orbit_circular_fix(&orbpar);
 
     /* effective-source context (M = 1, spin a) */
     ctx = effsource_equatorial_create(1.0, a);

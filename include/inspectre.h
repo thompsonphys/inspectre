@@ -15,6 +15,14 @@ double xFuncInsp(double a, double p, double e);
 /* Radial four-velocity u^r from the radial phase psi. */
 double fourVel(double psi, double a, double p, double e, double E);
 
+/* Circular limit: korb leaves Vr / Yr unset and wr = 0 for e == 0, so supply
+   the epicyclic frequency instead. _circular_fix patches wr / Yr / Vr in place
+   after korb_getparams; no-op when eccentric. */
+double inspectre_epicyclic_frequency(const korb_params *orbpar);
+double inspectre_radial_frequency(const korb_params *orbpar);
+double inspectre_radial_mino_period(const korb_params *orbpar);
+int    inspectre_orbit_circular_fix(korb_params *orbpar);
+
 /* Frequency shift exp(i Omega t) applied to a complex (re, im) pair, where
    Omega = mMode*omegaPhi + nMode*omegaR. */
 double frequencyShiftReal(double t, double omegaPhi, double omegaR,

@@ -59,6 +59,38 @@ double fourVel(double psi, double a, double p, double e, double E)
     return e * sin(psi) / p * sqrt(R2 > 0.0 ? R2 : 0.0);
 }
 
+double inspectre_epicyclic_frequency(const korb_params *orbpar)
+{
+    const double a = orbpar->a, p = orbpar->p;
+    double R = 1.0 - 6.0 / p + 8.0 * a / (p * sqrt(p)) - 3.0 * a * a / (p * p);
+
+    return orbpar->wphi * sqrt(R > 0.0 ? R : 0.0);
+}
+
+double inspectre_radial_frequency(const korb_params *orbpar)
+{
+    return orbpar->eccentric ? orbpar->wr : inspectre_epicyclic_frequency(orbpar);
+}
+
+double inspectre_radial_mino_period(const korb_params *orbpar)
+{
+    if (orbpar->eccentric)
+        return orbpar->Vr;
+
+    return 2.0 * M_PI / (orbpar->Ga * inspectre_epicyclic_frequency(orbpar));
+}
+
+int inspectre_orbit_circular_fix(korb_params *orbpar)
+{
+    if (orbpar->eccentric)
+        return 0;
+
+    orbpar->wr = inspectre_epicyclic_frequency(orbpar);
+    orbpar->Yr = orbpar->Ga * orbpar->wr;
+    orbpar->Vr = 2.0 * M_PI / orbpar->Yr;
+    return 1;
+}
+
 /* Assuming exp(i Omega t) rotation */
 double frequencyShiftReal(double t, double omegaPhi, double omegaR, double fieldRE, double fieldIM, int mMode, int nMode)
 {
@@ -355,7 +387,7 @@ void inspectre_mino_samples_build(struct effsource_equatorial_ctx *ctx, int mMod
         inspectre_mino_samples *out)
 {
     const int N = nSamples;
-    const double Vr = orbpar->Vr;
+    const double Vr = inspectre_radial_mino_period(orbpar);
 
     out->n  = N;
     out->Vr = Vr;
@@ -491,7 +523,7 @@ void inspectre_integrate_nmode(int mode,
         double *nModePhiS, double *nModeDPhiS, double *nModesrc)
 {
     /* coordinate-time radial period; n-mode amplitude is the period-average */
-    double Tr = korb_tfromla(orbpar->Vr, *orbpar);
+    double Tr = korb_tfromla(inspectre_radial_mino_period(orbpar), *orbpar);
 
     double res[12];
 
@@ -557,7 +589,7 @@ void inspectre_integrate_nmode(int mode,
         {
             double result, abserr;
             ip.component = c;
-            int st = gsl_integration_qag(&F, 0.0, orbpar->Vr, epsabs, epsrel, QAG_LIMIT,
+            int st = gsl_integration_qag(&F, 0.0, inspectre_radial_mino_period(orbpar), epsabs, epsrel, QAG_LIMIT,
                                 GSL_INTEG_GAUSS61, w, &result, &abserr);
             if (st == GSL_EMAXITER) {
                 insp_qag_limit_hits++;
@@ -653,7 +685,7 @@ void inspectre_fft_source_nmodes(struct effsource_equatorial_ctx *ctx, int mMode
         double a, double p, double e, double omegaPhi, double omegaR,
         int N, double *outRe, double *outIm)
 {
-    double Vr = orbpar->Vr;
+    double Vr = inspectre_radial_mino_period(orbpar);
     double Tr = korb_tfromla(Vr, *orbpar);
 
     /* lambda(t) spline so the source can be sampled on a uniform-t grid */
