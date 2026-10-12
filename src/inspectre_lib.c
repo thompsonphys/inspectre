@@ -768,7 +768,7 @@ static double insp_c1(const struct effsource_equatorial_ctx *ctx, const struct c
 
 static int insp_nphi(double C1, int mmax, int nphiMax, int *capped)
 {
-    double want = 37.0 / sqrt(C1);
+    double want = (double)mmax + 16.0 / sqrt(C1);
     if (want < 64.0)
         want = 64.0;
     if (want < 2.5 * mmax)
