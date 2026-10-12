@@ -178,4 +178,19 @@ void inspectre_fft_source_nmodes(struct effsource_equatorial_ctx *ctx, int mMode
         double a, double p, double e, double omegaPhi, double omegaR,
         int N, double *outRe, double *outIm);
 
+/* Routes for inspectre_fft_nmodes: analytic calc_m or numerical projection in phi. */
+enum { INSPECTRE_MROUTE_ANALYTIC = 0, INSPECTRE_MROUTE_PROJECTED = 1 };
+
+/* m-modes of PhiS, dPhiS/dr, dPhiS/dtheta and src at Mino time lambda by an FFT in the field azimuth. */
+int inspectre_mmode_projected(struct effsource_equatorial_ctx *ctx,
+        int nm, const int *mlist, struct coordinate *xField,
+        double lambda, korb_params *orbpar, double a, double p, double e,
+        int nphiMax, double *out, int *nphi, int *capped);
+
+/* (m,n)-modes of PhiS, dPhiS/dr, dPhiS/dtheta and src by an FFT over N uniform samples in t. */
+int inspectre_fft_nmodes(struct effsource_equatorial_ctx *ctx, int route,
+        int nm, const int *mlist, struct coordinate *xField,
+        korb_params *orbpar, double a, double p, double e, double omegaPhi,
+        int N, int nphiMax, double *out, double *info);
+
 #endif /* INSPECTRE_H */

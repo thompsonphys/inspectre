@@ -10,6 +10,7 @@
 
 #include <stdlib.h>
 #include <math.h>
+#include <float.h>
 #include <gsl/gsl_math.h>
 #include <gsl/gsl_errno.h>
 #include <gsl/gsl_roots.h>
@@ -129,13 +130,10 @@ void generateNModeIntegrands(double t, double omegaPhi, double omegaR, int mMode
  * (1) Effective source + puncture at a field point and time
  * ========================================================================= */
 
-void inspectre_eval_at_lambda(struct effsource_equatorial_ctx *ctx, int mMode,
-                              struct coordinate *xField, double lambda,
-                              korb_params *orbpar, double a, double p, double e,
-                              double *PhiS, double *dPhiS, double *ddPhiS,
-                              double *src)
+static double insp_set_particle(struct effsource_equatorial_ctx *ctx, double lambda,
+                                korb_params *orbpar, double a, double p, double e,
+                                int zeroPhi)
 {
-    /* particle position from the orbit at this Mino time */
     double psi   = korb_psifromla(lambda, *orbpar);
     double r_p   = korb_rfrompsi(psi, *orbpar);
     double phi_p = korb_phifromla(lambda, *orbpar);
@@ -144,10 +142,20 @@ void inspectre_eval_at_lambda(struct effsource_equatorial_ctx *ctx, int mMode,
     struct coordinate xParticle;
     xParticle.t     = 0.0;
     xParticle.r     = r_p;
-    xParticle.theta = M_PI_2; /* enforce equatorial orbits for now */
-    xParticle.phi   = phi_p;
+    xParticle.theta = M_PI_2;
+    xParticle.phi   = zeroPhi ? 0.0 : phi_p;
 
     effsource_equatorial_ctx_set_particle(ctx, &xParticle, orbpar->E, orbpar->Lz, ur);
+    return phi_p;
+}
+
+void inspectre_eval_at_lambda(struct effsource_equatorial_ctx *ctx, int mMode,
+                              struct coordinate *xField, double lambda,
+                              korb_params *orbpar, double a, double p, double e,
+                              double *PhiS, double *dPhiS, double *ddPhiS,
+                              double *src)
+{
+    insp_set_particle(ctx, lambda, orbpar, a, p, e, 0);
     effsource_equatorial_ctx_calc_m(ctx, mMode, xField, PhiS, dPhiS, ddPhiS, src);
 }
 
@@ -729,4 +737,218 @@ void inspectre_fft_source_nmodes(struct effsource_equatorial_ctx *ctx, int mMode
     gsl_interp_accel_free(acc);
     free(latT);
     free(latL);
+}
+
+static int insp_is_pow2_at_least_64(int n)
+{
+    return n >= 64 && (n & (n - 1)) == 0;
+}
+
+static int insp_check_mlist(int route, int nm, const int *mlist, int nphiMax)
+{
+    if (nm < 1)
+        return 1;
+    for (int i = 0; i < nm; i++) {
+        if (mlist[i] < 0)
+            return 1;
+        if (route == INSPECTRE_MROUTE_ANALYTIC && mlist[i] > 20)
+            return 1;
+        if (route == INSPECTRE_MROUTE_PROJECTED && mlist[i] > nphiMax / 2)
+            return 1;
+    }
+    return 0;
+}
+
+static double insp_c1(const struct effsource_equatorial_ctx *ctx, const struct coordinate *xField)
+{
+    double dr  = xField->r - ctx->xp.r;
+    double dth = xField->theta - ctx->xp.theta;
+    return (ctx->alpha20 * dr * dr + ctx->alpha02 * dth * dth) / ctx->beta;
+}
+
+static int insp_nphi(double C1, int mmax, int nphiMax, int *capped)
+{
+    double want = 37.0 / sqrt(C1);
+    if (want < 64.0)
+        want = 64.0;
+    if (want < 2.5 * mmax)
+        want = 2.5 * mmax;
+    if (!(want <= (double)nphiMax)) {
+        *capped = 1;
+        return nphiMax;
+    }
+    *capped = 0;
+    int n = 64;
+    while (n < want)
+        n *= 2;
+    return n;
+}
+
+typedef struct {
+    double       *in;
+    fftw_complex *out;
+    fftw_plan     plan;
+} insp_rfft;
+
+static insp_rfft insp_rfft_cache[31];
+
+static insp_rfft *insp_rfft_get(int n)
+{
+    int k = 0;
+    while ((1 << k) < n)
+        k++;
+    insp_rfft *c = &insp_rfft_cache[k];
+    if (!c->plan) {
+        int h = n / 2 + 1;
+        c->in   = (double *)fftw_malloc(sizeof(double) * 4 * (size_t)n);
+        c->out  = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * 4 * (size_t)h);
+        c->plan = fftw_plan_many_dft_r2c(1, &n, 4, c->in, NULL, 1, n,
+                                         c->out, NULL, 1, h, FFTW_ESTIMATE);
+    }
+    return c;
+}
+
+int inspectre_mmode_projected(struct effsource_equatorial_ctx *ctx,
+        int nm, const int *mlist, struct coordinate *xField,
+        double lambda, korb_params *orbpar, double a, double p, double e,
+        int nphiMax, double *out, int *nphi, int *capped)
+{
+    if (!insp_is_pow2_at_least_64(nphiMax)
+        || insp_check_mlist(INSPECTRE_MROUTE_PROJECTED, nm, mlist, nphiMax))
+        return 1;
+
+    double phi_p = insp_set_particle(ctx, lambda, orbpar, a, p, e, 1);
+    double C1 = insp_c1(ctx, xField);
+    *nphi = 0;
+    *capped = 0;
+    if (!(C1 > 0.0)) {
+        for (int i = 0; i < 8 * nm; i++)
+            out[i] = NAN;
+        return 0;
+    }
+
+    int mmax = 0;
+    for (int i = 0; i < nm; i++)
+        if (mlist[i] > mmax)
+            mmax = mlist[i];
+    int n = insp_nphi(C1, mmax, nphiMax, capped);
+    *nphi = n;
+
+    insp_rfft *c = insp_rfft_get(n);
+    struct coordinate x = *xField;
+    for (int k = 0; k < n; k++) {
+        double PhiS, dPhiS[4], d2PhiS[10], src;
+        x.phi = 2.0 * M_PI * (double)k / (double)n;
+        effsource_equatorial_ctx_calc(ctx, &x, &PhiS, dPhiS, d2PhiS, &src);
+        c->in[k]         = PhiS;
+        c->in[n + k]     = dPhiS[1];
+        c->in[2 * n + k] = dPhiS[2];
+        c->in[3 * n + k] = src;
+    }
+    fftw_execute(c->plan);
+
+    int h = n / 2 + 1;
+    double w = 2.0 * M_PI / (double)n;
+    for (int i = 0; i < nm; i++) {
+        int m = mlist[i];
+        double cm = cos(m * phi_p), sm = sin(m * phi_p);
+        for (int q = 0; q < 4; q++) {
+            double fr = c->out[q * h + m][0], fi = c->out[q * h + m][1];
+            out[(i * 4 + q) * 2]     = w * (fr * cm + fi * sm);
+            out[(i * 4 + q) * 2 + 1] = w * (fi * cm - fr * sm);
+        }
+    }
+    return 0;
+}
+
+static double insp_lambda_newton(double t, double lambda, korb_params *orbpar, int *stalled)
+{
+    for (int it = 0; it < 20; it++) {
+        double dl = (korb_tfromla(lambda, *orbpar) - t) / insp_dtdlambda(lambda, orbpar);
+        lambda -= dl;
+        if (fabs(dl) <= 4.0 * DBL_EPSILON * fabs(lambda))
+            return lambda;
+    }
+    *stalled = 1;
+    return lambda;
+}
+
+int inspectre_fft_nmodes(struct effsource_equatorial_ctx *ctx, int route,
+        int nm, const int *mlist, struct coordinate *xField,
+        korb_params *orbpar, double a, double p, double e, double omegaPhi,
+        int N, int nphiMax, double *out, double *info)
+{
+    if ((route != INSPECTRE_MROUTE_ANALYTIC && route != INSPECTRE_MROUTE_PROJECTED)
+        || N < 41 || !insp_is_pow2_at_least_64(nphiMax)
+        || insp_check_mlist(route, nm, mlist, nphiMax))
+        return 1;
+
+    double Vr = inspectre_radial_mino_period(orbpar);
+    double Tr = korb_tfromla(Vr, *orbpar);
+    int nq = 4 * nm;
+
+    fftw_complex *buf = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * (size_t)nq * (size_t)N);
+    fftw_plan plan = fftw_plan_many_dft(1, &N, nq, buf, NULL, 1, N,
+                                        buf, NULL, 1, N, FFTW_BACKWARD, FFTW_ESTIMATE);
+    double *slice = (double *)malloc(sizeof(double) * 8 * (size_t)nm);
+
+    for (int i = 0; i < 5; i++)
+        info[i] = 0.0;
+
+    double lambda = 0.0;
+    for (int j = 0; j < N; j++) {
+        double t = (double)j / (double)N * Tr;
+        if (j > 0) {
+            int stalled = 0;
+            lambda = insp_lambda_newton(t, lambda + (Tr / N) / insp_dtdlambda(lambda, orbpar),
+                                        orbpar, &stalled);
+            info[4] += stalled;
+        }
+        double res = fabs(korb_tfromla(lambda, *orbpar) - t);
+        if (res > info[3])
+            info[3] = res;
+
+        if (route == INSPECTRE_MROUTE_ANALYTIC) {
+            insp_set_particle(ctx, lambda, orbpar, a, p, e, 0);
+            if (!(insp_c1(ctx, xField) > 0.0))
+                info[2] += 1.0;
+            for (int i = 0; i < nm; i++) {
+                double PhiS[2], dPhiS[8], ddPhiS[20], src[2];
+                effsource_equatorial_ctx_calc_m(ctx, mlist[i], xField, PhiS, dPhiS, ddPhiS, src);
+                double *s = slice + 8 * i;
+                s[0] = PhiS[0];   s[1] = PhiS[1];
+                s[2] = dPhiS[2];  s[3] = dPhiS[3];
+                s[4] = dPhiS[4];  s[5] = dPhiS[5];
+                s[6] = src[0];    s[7] = src[1];
+            }
+        } else {
+            int nphi, capped;
+            inspectre_mmode_projected(ctx, nm, mlist, xField, lambda, orbpar, a, p, e,
+                                      nphiMax, slice, &nphi, &capped);
+            if (nphi == 0)
+                info[2] += 1.0;
+            if (nphi > info[0])
+                info[0] = nphi;
+            info[1] += capped;
+        }
+
+        for (int i = 0; i < nm; i++)
+            for (int q = 0; q < 4; q++) {
+                double re = slice[(i * 4 + q) * 2], im = slice[(i * 4 + q) * 2 + 1];
+                size_t idx = (size_t)(i * 4 + q) * (size_t)N + (size_t)j;
+                buf[idx][0] = frequencyShiftReal(t, omegaPhi, 0.0, re, im, mlist[i], 0);
+                buf[idx][1] = frequencyShiftImag(t, omegaPhi, 0.0, re, im, mlist[i], 0);
+            }
+    }
+
+    fftw_execute(plan);
+    for (size_t idx = 0; idx < (size_t)nq * (size_t)N; idx++) {
+        out[2 * idx]     = buf[idx][0] / (double)N;
+        out[2 * idx + 1] = buf[idx][1] / (double)N;
+    }
+
+    fftw_destroy_plan(plan);
+    fftw_free(buf);
+    free(slice);
+    return 0;
 }

@@ -487,6 +487,36 @@ class Inspectre:
             self.omega_phi, self.omega_r, N,
         )
 
+    def mmode_projected_fast(self, mlist, r_field, theta_field, lam, nphi_max=2**20):
+        """C numerical m-modes of PhiS, dPhiS/dr, dPhiS/dtheta and src at Mino time lam."""
+        self._require_c()
+        xF = self.es.make_coordinate(0.0, r_field, theta_field, 0.0)
+        out, nphi, capped = inspectre_c.mmode_projected(
+            self._ctx, list(mlist), xF, lam, self._orbpar,
+            self.spin, self.semilatus_rectum, self.eccentricity, nphi_max,
+        )
+        v = np.array(out).reshape(len(mlist), 4, 2)
+        return v[..., 0] + 1j * v[..., 1], nphi, capped
+
+    def fft_nmodes_fast(self, mlist, r_field, theta_field, N, route, nphi_max=2**20):
+        """C (m,n)-modes of PhiS, dPhiS/dr, dPhiS/dtheta and src from N uniform samples in t."""
+        self._require_c()
+        codes = {
+            "analytic": inspectre_c.INSPECTRE_MROUTE_ANALYTIC,
+            "numerical": inspectre_c.INSPECTRE_MROUTE_PROJECTED,
+        }
+        if route not in codes:
+            raise ValueError(f"unknown route {route!r}")
+        xF = self.es.make_coordinate(0.0, r_field, theta_field, 0.0)
+        out, info = inspectre_c.fft_nmodes(
+            self._ctx, codes[route], list(mlist), xF, self._orbpar,
+            self.spin, self.semilatus_rectum, self.eccentricity,
+            self.omega_phi, N, nphi_max,
+        )
+        v = np.array(out).reshape(len(mlist), 4, N, 2)
+        keys = ("nphi_max", "capped", "c1_zero", "newton_residual", "newton_maxit")
+        return v[..., 0] + 1j * v[..., 1], dict(zip(keys, info))
+
     def source_along_trajectory(self, r_field, theta_field, phi_field):
 
         self.check_trajectory()

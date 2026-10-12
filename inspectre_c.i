@@ -18,7 +18,10 @@
 %}
 
 %include "carrays.i"
+%include "typemaps.i"
 %array_class(double, doubleArray);
+%array_class(int, intArray);
+%apply int *OUTPUT { int *nphi, int *capped };
 
 /* korb.h declares `double complex` prototypes; neutralize the C99 keyword for
    SWIG's parser exactly as kerrgeodesics.i does (this directive is not emitted
@@ -152,4 +155,37 @@ def mino_samples_integrate(s, mMode, nMode, omegaPhi, omegaR):
 
 def mino_samples_free(s):
     inspectre_mino_samples_free(s)
+
+
+def _int_array(seq):
+    a = intArray(max(len(seq), 1))
+    for i, v in enumerate(seq):
+        a[i] = int(v)
+    return a
+
+
+def mmode_projected(ctx, mlist, xField, lam, orbpar, a, p, e, nphiMax):
+    """m-modes at Mino time lam from an FFT in the field azimuth: (out[8*len(mlist)], nphi, capped)."""
+    ms = _int_array(mlist)
+    size = 8 * len(mlist)
+    out = doubleArray(max(size, 1))
+    status, nphi, capped = inspectre_mmode_projected(
+        ctx, len(mlist), ms.cast(), xField, lam, orbpar, a, p, e, nphiMax, out.cast())
+    if status != 0:
+        raise ValueError("inspectre_mmode_projected: invalid input")
+    return [out[i] for i in range(size)], nphi, capped
+
+
+def fft_nmodes(ctx, route, mlist, xField, orbpar, a, p, e, omegaPhi, N, nphiMax):
+    """(m,n)-modes from an FFT over N uniform samples in t: (out[8*len(mlist)*N], info[5])."""
+    ms = _int_array(mlist)
+    size = 8 * len(mlist) * N
+    out = doubleArray(max(size, 1))
+    info = doubleArray(5)
+    status = inspectre_fft_nmodes(
+        ctx, route, len(mlist), ms.cast(), xField, orbpar, a, p, e, omegaPhi,
+        N, nphiMax, out.cast(), info.cast())
+    if status != 0:
+        raise ValueError("inspectre_fft_nmodes: invalid input")
+    return [out[i] for i in range(size)], [info[i] for i in range(5)]
 %}
